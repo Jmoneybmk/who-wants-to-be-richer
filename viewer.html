@@ -453,13 +453,11 @@ function renderActivePlayerView(me, game) {
     });
   }
 
-  // Final answer
+  // Final answer — submit intent directly. Host opens confirm modal, phone mirrors with YES/NO buttons.
   const finalBtn = document.getElementById('final-btn');
   if (finalBtn) finalBtn.addEventListener('click', () => {
     if (myAnswerSelection === null) return;
-    if (confirm('Lock in answer ' + ['A','B','C','D'][myAnswerSelection] + ': ' + game.currentQuestion.a[myAnswerSelection] + '?')) {
-      window.firebaseSync.submitIntent('final-answer', { idx: myAnswerSelection });
-    }
+    window.firebaseSync.submitIntent('final-answer', { idx: myAnswerSelection });
   });
 
   const walkBtn = document.getElementById('walk-btn');

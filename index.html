@@ -241,6 +241,31 @@
   .player-count-btns { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
   .pc-btn { flex: 1; padding: 0.7rem; background: rgba(187,107,217,0.1); border: 2px solid var(--team); color: var(--team-glow); font-family: 'Orbitron'; font-weight: 700; cursor: pointer; border-radius: 4px; transition: all 0.15s; }
   .pc-btn.active { background: var(--team); color: white; box-shadow: 0 0 15px rgba(187,107,217,0.5); }
+
+  /* Dropdown styling — make <select> and <option> readable on dark theme */
+  select {
+    background-color: var(--bg-mid);
+    color: white;
+    font-family: 'Rajdhani', sans-serif;
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path d='M1 1l5 5 5-5' stroke='%23f4c430' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 0.6rem center;
+    padding-right: 1.8rem !important;
+    cursor: pointer;
+  }
+  select:focus { outline: none; box-shadow: 0 0 12px rgba(187,107,217,0.4); }
+  select option {
+    background-color: var(--bg-mid);
+    color: white;
+    padding: 0.5rem;
+  }
+  select option:checked, select option:hover {
+    background-color: var(--team);
+    color: white;
+  }
 </style>
 </head>
 <body>

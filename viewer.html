@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Millionaire — Viewer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg-deep: #020814;
+    --bg-mid: #081a3a;
+    --bg-light: #0f2556;
+    --gold: #f4c430;
+    --gold-glow: #ffd84d;
+    --white: #ffffff;
+    --dim: #b8c4da;
+    --correct: #2ecc71;
+    --wrong: #e74c3c;
+    --selected: #ff8c00;
+    --selected-glow: #ffb347;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: 'Rajdhani', sans-serif;
+    color: var(--white);
+    background: radial-gradient(ellipse at center, var(--bg-light) 0%, var(--bg-mid) 35%, var(--bg-deep) 100%);
+    background-attachment: fixed;
+    min-height: 100vh;
+    padding: 1rem;
+  }
+  .wrap {
+    max-width: 500px; margin: 0 auto; padding-top: 1.5rem;
+  }
+  h1 {
+    font-family: 'Orbitron', sans-serif; font-weight: 900;
+    font-size: 1.5rem; text-align: center; letter-spacing: 0.1em;
+    background: linear-gradient(180deg, #fff6c9, var(--gold));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    margin-bottom: 0.3rem;
+  }
+  .sub {
+    font-family: 'Orbitron', sans-serif; font-size: 0.7rem;
+    text-align: center; color: var(--dim);
+    letter-spacing: 0.3em; margin-bottom: 1.5rem;
+  }
+  .card {
+    background: rgba(5,10,25,0.7);
+    border: 1px solid rgba(244,196,48,0.3);
+    border-radius: 8px; padding: 1.2rem;
+    margin-bottom: 1rem;
+  }
+  .card h2 {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 0.9rem; letter-spacing: 0.15em;
+    color: var(--gold); text-transform: uppercase;
+    margin-bottom: 0.8rem;
+  }
+  input[type="text"] {
+    width: 100%; padding: 0.8rem 1rem;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid var(--gold);
+    border-radius: 4px; color: white;
+    font-family: 'Rajdhani', sans-serif; font-size: 1.1rem;
+    margin-bottom: 0.8rem;
+  }
+  input[type="text"]:focus { outline: none; border-color: var(--gold-glow); box-shadow: 0 0 12px rgba(244,196,48,0.3); }
+  .btn {
+    width: 100%;
+    font-family: 'Orbitron', sans-serif; font-weight: 700;
+    font-size: 1rem; letter-spacing: 0.1em; text-transform: uppercase;
+    padding: 0.9rem; border: 2px solid var(--gold);
+    background: linear-gradient(180deg, rgba(244,196,48,0.15), rgba(244,196,48,0.02));
+    color: var(--gold); cursor: pointer;
+    border-radius: 4px; transition: all 0.2s;
+  }
+  .btn:hover:not(:disabled) {
+    background: linear-gradient(180deg, rgba(244,196,48,0.3), rgba(244,196,48,0.08));
+    box-shadow: 0 0 18px rgba(244,196,48,0.5);
+  }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .question-text {
+    font-family: 'Rajdhani', sans-serif; font-weight: 600;
+    font-size: 1.2rem; line-height: 1.4;
+    text-align: center; padding: 0.5rem 0 1rem;
+  }
+  .answers { display: flex; flex-direction: column; gap: 0.5rem; }
+  .answer-btn {
+    display: flex; align-items: center; gap: 0.7rem;
+    padding: 0.9rem 1rem; border: 2px solid var(--gold);
+    background: linear-gradient(90deg, rgba(15,37,86,0.8), rgba(8,26,58,0.5));
+    color: white; text-align: left; cursor: pointer;
+    font-family: 'Rajdhani', sans-serif; font-weight: 600;
+    font-size: 1rem; border-radius: 4px;
+    transition: all 0.15s;
+  }
+  .answer-btn:hover:not(:disabled) {
+    background: linear-gradient(90deg, rgba(244,196,48,0.18), rgba(244,196,48,0.04));
+    box-shadow: 0 0 12px rgba(244,196,48,0.35);
+  }
+  .answer-btn.picked {
+    background: linear-gradient(90deg, rgba(255,140,0,0.4), rgba(255,140,0,0.15));
+    border-color: var(--selected-glow);
+    box-shadow: 0 0 18px var(--selected);
+  }
+  .answer-btn.correct {
+    background: linear-gradient(90deg, rgba(46,204,113,0.4), rgba(46,204,113,0.15));
+    border-color: var(--correct);
+  }
+  .answer-btn.wrong {
+    background: linear-gradient(90deg, rgba(231,76,60,0.4), rgba(231,76,60,0.15));
+    border-color: var(--wrong);
+  }
+  .answer-btn:disabled { cursor: default; }
+  .answer-btn .letter {
+    font-family: 'Orbitron'; font-weight: 900; color: var(--gold);
+    min-width: 1.5em;
+  }
+  .status {
+    text-align: center; padding: 1rem;
+    color: var(--dim); font-style: italic;
+    font-size: 0.95rem;
+  }
+  .status.success { color: var(--correct); }
+  .tier-badge {
+    display: inline-block;
+    background: var(--gold); color: var(--bg-deep);
+    padding: 0.2rem 0.6rem; border-radius: 3px;
+    font-family: 'Orbitron'; font-size: 0.75rem;
+    font-weight: 700; letter-spacing: 0.1em;
+    margin-bottom: 0.8rem;
+  }
+  .greeting {
+    text-align: center; color: var(--gold-glow);
+    font-family: 'Orbitron'; font-size: 0.85rem;
+    letter-spacing: 0.1em; margin-bottom: 1rem;
+  }
+  .error {
+    background: rgba(231,76,60,0.15);
+    border: 1px solid var(--wrong);
+    border-radius: 4px; padding: 0.8rem;
+    color: #ffb3ad; font-size: 0.9rem;
+    margin-bottom: 1rem;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Millionaire</h1>
+  <div class="sub">Audience Voter</div>
+  <div id="content"></div>
+</div>
+
+<script src="firebase.js"></script>
+<script>
+/* ========== VIEWER LOGIC ========== */
+
+let roomRef = null;
+let voterId = null;
+let voterName = '';
+let lastState = null;
+let lastQuestion = null;
+let myVote = null;
+
+function getRoomFromHash() {
+  const hash = window.location.hash.substring(1);
+  const params = new URLSearchParams(hash);
+  return params.get('room');
+}
+
+function setContent(html) {
+  document.getElementById('content').innerHTML = html;
+}
+
+function renderNameEntry() {
+  const saved = localStorage.getItem('viewer_name') || '';
+  setContent(`
+    <div class="card">
+      <h2>Enter Your Name</h2>
+      <p style="color:var(--dim); margin-bottom:1rem; font-size:0.9rem">
+        You'll vote on questions with the audience.
+      </p>
+      <input type="text" id="name-input" placeholder="Your name" value="${saved}" maxlength="20" autofocus />
+      <button class="btn" id="join-btn">Join Stream</button>
+    </div>
+  `);
+  const input = document.getElementById('name-input');
+  const btn = document.getElementById('join-btn');
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') btn.click(); });
+  btn.addEventListener('click', async () => {
+    const name = input.value.trim();
+    if (!name) { input.focus(); return; }
+    voterName = name;
+    localStorage.setItem('viewer_name', name);
+    voterId = 'v_' + Math.random().toString(36).substring(2, 12);
+    await connectToRoom();
+  });
+}
+
+async function connectToRoom() {
+  const roomId = getRoomFromHash();
+  if (!roomId) {
+    setContent(`<div class="error">No room code in URL. Ask the host for the correct link or scan the QR code on their screen.</div>`);
+    return;
+  }
+  if (!window.firebaseSync.isConfigured()) {
+    setContent(`<div class="error">Viewer connection not configured. The host needs to set up Firebase in firebase.js first.</div>`);
+    return;
+  }
+  setContent(`<div class="status">Connecting to room <b>${roomId}</b>...</div>`);
+  const ref = await window.firebaseSync.joinRoom(roomId);
+  if (!ref) {
+    setContent(`<div class="error">Room <b>${roomId}</b> not found. Double-check the code or ask the host to restart the stream.</div>`);
+    return;
+  }
+  roomRef = ref;
+  subscribeToRoom();
+}
+
+function subscribeToRoom() {
+  roomRef.on('value', (snapshot) => {
+    const data = snapshot.val();
+    if (!data) {
+      setContent(`<div class="error">Room closed by host.</div>`);
+      return;
+    }
+    renderFromRoomState(data);
+  });
+}
+
+function renderFromRoomState(data) {
+  const { state, question, votingOpen, correctIdx } = data;
+
+  // Reset my vote if question changed
+  const qKey = question ? question.q + '-' + question.tier : null;
+  if (qKey !== lastQuestion) {
+    myVote = null;
+    lastQuestion = qKey;
+  }
+  lastState = state;
+
+  if (state === 'waiting' || !question) {
+    setContent(`
+      <div class="greeting">Welcome, ${escapeHtml(voterName)}!</div>
+      <div class="card">
+        <div class="status">Waiting for the host to start a question...</div>
+      </div>
+    `);
+    return;
+  }
+
+  if (state === 'ended') {
+    setContent(`
+      <div class="card">
+        <div class="status success">The game has ended. Thanks for playing!</div>
+      </div>
+    `);
+    return;
+  }
+
+  // state = 'question' or 'result'
+  const letters = ['A', 'B', 'C', 'D'];
+  const isResult = state === 'result';
+  const canVote = votingOpen && !isResult && myVote === null;
+  const voted = myVote !== null;
+
+  let statusHTML = '';
+  if (isResult) {
+    statusHTML = `<div class="status success">Result revealed!</div>`;
+  } else if (votingOpen) {
+    statusHTML = voted
+      ? `<div class="status success">✓ Vote locked in — ${letters[myVote]}</div>`
+      : `<div class="status" style="color:var(--gold-glow)">🗳️ Voting is OPEN — pick your answer!</div>`;
+  } else {
+    statusHTML = `<div class="status">Waiting for host to open voting...</div>`;
+  }
+
+  const answersHTML = question.a.map((text, i) => {
+    const classes = ['answer-btn'];
+    if (myVote === i) classes.push('picked');
+    if (isResult) {
+      if (i === correctIdx) classes.push('correct');
+      else if (myVote === i) classes.push('wrong');
+    }
+    const disabled = !canVote ? 'disabled' : '';
+    return `
+      <button class="${classes.join(' ')}" data-idx="${i}" ${disabled}>
+        <span class="letter">${letters[i]}</span>
+        <span>${escapeHtml(text)}</span>
+      </button>
+    `;
+  }).join('');
+
+  setContent(`
+    <div class="greeting">Playing as ${escapeHtml(voterName)}</div>
+    <div class="card">
+      <span class="tier-badge">Question ${question.tier} of 15</span>
+      <div class="question-text">${escapeHtml(question.q)}</div>
+      <div class="answers">${answersHTML}</div>
+      ${statusHTML}
+    </div>
+  `);
+
+  if (canVote) {
+    document.querySelectorAll('.answer-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const idx = parseInt(btn.dataset.idx, 10);
+        myVote = idx;
+        await window.firebaseSync.castVote(roomRef, voterId, voterName, idx);
+        // Re-render to show locked-in state
+        const snap = await roomRef.once('value');
+        renderFromRoomState(snap.val());
+      });
+    });
+  }
+}
+
+function escapeHtml(s) {
+  if (typeof s !== 'string') return '';
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/* ---------- INIT ---------- */
+(async function init() {
+  const roomId = getRoomFromHash();
+  if (!roomId) {
+    setContent(`<div class="error">No room code in URL. Scan the QR code on the host's screen.</div>`);
+    return;
+  }
+  if (!window.firebaseSync.isConfigured()) {
+    setContent(`<div class="error">Firebase not configured in firebase.js. Host must complete setup first.</div>`);
+    return;
+  }
+  renderNameEntry();
+})();
+</script>
+</body>
+</html>

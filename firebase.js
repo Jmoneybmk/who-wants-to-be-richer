@@ -23,7 +23,7 @@
    `python -m http.server 8000` and use your local IP.
    ========================================================= */
 
-window.firebaseSync = (function () {
+window.firebaseSync = (function() {
 
   // ============================================================
   // PASTE YOUR FIREBASE CONFIG HERE (uncomment all lines)
@@ -65,7 +65,7 @@ window.firebaseSync = (function () {
   function loadScript(src) {
     return new Promise((resolve, reject) => {
       const s = document.createElement('script');
-      s.src = src; s.onload = () => resolve(); s.onerror = () => reject(new Error('Failed: ' + src));
+      s.src = src; s.onload = () => resolve(); s.onerror = () => reject(new Error('Failed: '+src));
       document.head.appendChild(s);
     });
   }
@@ -123,7 +123,7 @@ window.firebaseSync = (function () {
         audience: { active: false }
       });
       // Auto-cleanup after 4 hours
-      setTimeout(() => { try { roomRef && roomRef.remove(); } catch (e) { } }, 4 * 60 * 60 * 1000);
+      setTimeout(() => { try { roomRef && roomRef.remove(); } catch (e) {} }, 4 * 60 * 60 * 1000);
       console.log('[firebaseSync] room created:', currentRoomId);
       return currentRoomId;
     } catch (e) {
@@ -182,7 +182,7 @@ window.firebaseSync = (function () {
   // Host: update player tally / elimination
   async function updatePlayer(viewerId, fields) {
     if (!roomRef) return;
-    try { await roomRef.child('viewers/' + viewerId).update(fields); } catch (e) { }
+    try { await roomRef.child('viewers/' + viewerId).update(fields); } catch (e) {}
   }
 
   // Host: subscribe to viewers list (for lobby and during game)
@@ -192,7 +192,7 @@ window.firebaseSync = (function () {
     const handler = (snap) => callback(snap.val() || {});
     ref.on('value', handler);
     listeners.push({ ref, handler });
-    return () => { try { ref.off('value', handler); } catch (e) { } };
+    return () => { try { ref.off('value', handler); } catch (e) {} };
   }
 
   // Host: subscribe to incoming intents from players
@@ -200,21 +200,20 @@ window.firebaseSync = (function () {
     if (!roomRef) return null;
     const ref = roomRef.child('intents');
     const handler = (snap) => {
-      const intents = snap.val() || {};
-      Object.keys(intents).forEach(intentId => {
-        const intent = intents[intentId];
-        callback(intent, intentId);
-      });
+      // child_added fires once per new intent; snap.val() is the single intent, snap.key is its ID
+      const intent = snap.val();
+      const intentId = snap.key;
+      if (intent) callback(intent, intentId);
     };
     ref.on('child_added', handler);
     listeners.push({ ref, handler, type: 'child_added' });
-    return () => { try { ref.off('child_added', handler); } catch (e) { } };
+    return () => { try { ref.off('child_added', handler); } catch (e) {} };
   }
 
   // Host: clear an intent after processing
   async function consumeIntent(intentId) {
     if (!roomRef) return;
-    try { await roomRef.child('intents/' + intentId).remove(); } catch (e) { }
+    try { await roomRef.child('intents/' + intentId).remove(); } catch (e) {}
   }
 
   // Host: subscribe to audience votes
@@ -224,25 +223,25 @@ window.firebaseSync = (function () {
     const handler = (snap) => callback(snap.val() || {});
     ref.on('value', handler);
     listeners.push({ ref, handler });
-    return () => { try { ref.off('value', handler); } catch (e) { } };
+    return () => { try { ref.off('value', handler); } catch (e) {} };
   }
 
   // Host: open audience voting (writes audience config)
   async function setAudience(audienceState) {
     if (!roomRef) return;
-    try { await roomRef.child('audience').set(audienceState); } catch (e) { }
+    try { await roomRef.child('audience').set(audienceState); } catch (e) {}
   }
 
   // Host: clear audience votes (start of new vote)
   async function clearAudienceVotes() {
     if (!roomRef) return;
-    try { await roomRef.child('audience/votes').set({}); } catch (e) { }
+    try { await roomRef.child('audience/votes').set({}); } catch (e) {}
   }
 
   async function closeRoom() {
-    listeners.forEach(l => { try { l.ref.off(l.type || 'value', l.handler); } catch (e) { } });
+    listeners.forEach(l => { try { l.ref.off(l.type || 'value', l.handler); } catch (e) {} });
     listeners = [];
-    if (roomRef) { try { await roomRef.remove(); } catch (e) { } }
+    if (roomRef) { try { await roomRef.remove(); } catch (e) {} }
     roomRef = null; currentRoomId = null;
   }
 
@@ -283,7 +282,7 @@ window.firebaseSync = (function () {
     const handler = (snap) => callback(snap.val());
     roomRef.on('value', handler);
     listeners.push({ ref: roomRef, handler });
-    return () => { try { roomRef.off('value', handler); } catch (e) { } };
+    return () => { try { roomRef.off('value', handler); } catch (e) {} };
   }
 
   // Viewer: submit an intent (player action) to host

@@ -312,7 +312,17 @@ let state = {
   // QR / Firebase
   roomId: null,
   viewerCount: 0,
-  // Setup transient state
+  firebaseStatus: null,
+  lobbyRoomReady: false,
+  lobbyViewers: {},      // { viewerId: { name, role, ... } }
+  intentListenerSetup: false,
+  // Roster: which viewers / local names are assigned to which player slot
+  roster: [],            // [{ source:'local'|'viewer', viewerId, name, slot }]
+  audienceExpiresAt: 0,  // ms timestamp, set by host when Ask the Audience triggered
+  // Replace-player modal
+  showReplaceModal: false,
+  replaceTargetSlot: null,
+  // Setup transient state (legacy local-only path)
   setupPlayers: [],
   setupPlayerCount: 2,
 };
@@ -454,46 +464,56 @@ function startNewGame(mode, theme, opts = {}) {
   state.lifelineEnded = false;
   state.continuePrompt = false;
   state.audienceActive = false;
-  state.viewerCount = 0;
 
-  if (isTeamMode()) {
-    state.players = (opts.players || []).map(name => ({ name, eliminated: false, correctTiers: [] }));
-    shuffleTurnOrder();
-    state.currentPlayerIdx = state.turnOrder[0];
+  // Build players list — roster takes precedence if provided
+  if (opts.roster && opts.roster.length > 0) {
+    state.players = opts.roster.map(r => ({
+      name: r.name,
+      eliminated: false,
+      correctTiers: [],
+      viewerId: r.viewerId || null,  // null = local player at host PC
+      source: r.source              // 'local' | 'viewer'
+    }));
+  } else if (isTeamMode()) {
+    state.players = (opts.players || []).map(name => ({
+      name, eliminated: false, correctTiers: [],
+      viewerId: null, source: 'local'
+    }));
+  } else if (mode === 'single' && opts.singlePlayerName) {
+    state.players = [{
+      name: opts.singlePlayerName,
+      eliminated: false, correctTiers: [],
+      viewerId: opts.singlePlayerViewerId || null,
+      source: opts.singlePlayerViewerId ? 'viewer' : 'local'
+    }];
   } else {
     state.players = [];
+  }
+
+  if (isTeamMode() || (mode === 'single' && state.players.length > 0)) {
+    if (isTeamMode()) {
+      shuffleTurnOrder();
+      state.currentPlayerIdx = state.turnOrder[0];
+    } else {
+      state.currentPlayerIdx = 0;
+    }
+  } else {
     state.currentPlayerIdx = null;
   }
 
   state.screen = 'game';
   audio.startBGM();
 
-  // Initialize Firebase room if configured (for audience lifeline)
-  state.firebaseStatus = null;
-  if (window.firebaseSync && window.firebaseSync.isConfigured()) {
-    console.log('[game] Firebase is configured, attempting to create viewer room...');
-    state.firebaseStatus = 'connecting';
-    window.firebaseSync.createRoom().then(code => {
-      if (code) {
-        state.roomId = code;
-        state.firebaseStatus = 'connected';
-        window.firebaseSync.subscribeToVotes(onViewerVoteUpdate);
-        console.log('[game] Viewer room ready:', code);
-        render();
-      } else {
-        state.firebaseStatus = 'failed';
-        console.error('[game] Firebase room creation FAILED. Run window.firebaseSync.getStatus() in this console to see why.');
-        render();
-      }
-    }).catch(err => {
-      state.firebaseStatus = 'failed';
-      console.error('[game] Firebase createRoom rejected:', err);
-      render();
+  // Set meta on Firebase room (room already exists from main menu)
+  if (state.roomId && window.firebaseSync) {
+    window.firebaseSync.setMeta({
+      phase: 'game',
+      mode: state.mode,
+      hostMode: !!opts.hostMode,
+      theme: state.theme,
+      safetyNetsEnabled: state.safetyNetsEnabled
     });
-  } else if (window.firebaseSync) {
-    const status = window.firebaseSync.getStatus();
-    console.log('[game] Firebase NOT configured. Status:', status);
-    state.firebaseStatus = 'unconfigured';
+    setupIntentListener();
   }
 
   loadQuestionForCurrentTier(true);
@@ -518,11 +538,7 @@ function loadQuestionForCurrentTier(autoStartTimerInSingle) {
   state.timerPaused = false;
   state.timerRunning = false;
 
-  // Broadcast question to viewers
-  if (state.roomId && window.firebaseSync) {
-    window.firebaseSync.broadcastQuestion(q, state.currentTier);
-  }
-
+  // Game state is broadcast via render() → broadcastGameState()
   render();
 
   if ((state.mode === 'single' || isTeamMode()) && autoStartTimerInSingle) {
@@ -611,9 +627,6 @@ function revealAndResolve(chosenIdx, timeout) {
   state.answerLocked = true;
   state.revealing = true;
   stopTimer();
-  if (state.roomId && window.firebaseSync) {
-    window.firebaseSync.broadcastResult(state.currentQuestion.correct);
-  }
   render();
   const correctIdx = state.currentQuestion.correct;
   const wasCorrect = chosenIdx === correctIdx;
@@ -783,11 +796,9 @@ async function endGame(won, reason) {
   });
   await deleteSavedGame();
 
-  // Notify viewers
+  // Notify viewers — set phase to ended but keep room alive
   if (state.roomId && window.firebaseSync) {
-    await window.firebaseSync.broadcastGameEnd();
-    await window.firebaseSync.closeRoom();
-    state.roomId = null;
+    await window.firebaseSync.setMeta({ phase: 'ended' });
   }
 
   state.screen = 'result';
@@ -871,6 +882,8 @@ function cancelLifelineEarly() {
 }
 
 /* ---------- ASK THE AUDIENCE ---------- */
+const AUDIENCE_VOTE_SECONDS = 10;
+
 function useAudience() {
   if (!state.lifelines.audience || state.answerLocked || state.confirmingFinal) return;
   state.lifelines.audience = false;
@@ -881,27 +894,44 @@ function useAudience() {
   audio.lifelineActivate();
   speak("Ask the audience.");
 
+  state.audienceExpiresAt = Date.now() + AUDIENCE_VOTE_SECONDS * 1000;
+
   // Open voting for live viewers
   if (state.roomId && window.firebaseSync) {
-    window.firebaseSync.openVoting();
+    window.firebaseSync.setAudience({
+      active: true,
+      expiresAt: state.audienceExpiresAt,
+      votes: {}
+    });
+    // Subscribe to audience votes
+    window.firebaseSync.subscribeToAudienceVotes((votes) => {
+      const v = votes || {};
+      // Merge AI votes (already in state.audienceVoters) with viewer votes
+      const aiVoters = state.audienceVoters.filter(x => x.isAI);
+      const humanVoters = Object.values(v).map(x => ({ name: x.name, choice: x.choice, isAI: false }));
+      state.audienceVoters = [...aiVoters, ...humanVoters];
+      // Recompute tally from all voters
+      const tally = [0,0,0,0];
+      state.audienceVoters.forEach(vt => { if (typeof vt.choice === 'number') tally[vt.choice]++; });
+      state.audienceTally = tally;
+      render();
+    });
   }
 
-  // Schedule AI votes — spread over ~5 seconds for drama
+  // Schedule AI votes — spread over the 10-second window
   const correctIdx = state.currentQuestion.correct;
-  const hiddenSet = new Set(state.hiddenAnswers); // 50/50 respects hides
+  const hiddenSet = new Set(state.hiddenAnswers);
   const validChoices = [0, 1, 2, 3].filter(i => !hiddenSet.has(i));
 
   AI_VOTER_NAMES.forEach((name, i) => {
     const accuracy = AI_VOTER_ACCURACIES[i];
-    const delay = 400 + Math.random() * 4600; // 0.4-5 sec
+    const delay = 400 + Math.random() * (AUDIENCE_VOTE_SECONDS * 1000 - 1500); // 0.4 to ~8.5s
     setTimeout(() => {
       if (!state.audienceActive) return;
       let choice;
-      // Pick correct with probability = accuracy; otherwise random wrong
-      if (Math.random() < accuracy && validChoices.includes(correctIdx)) {
-        choice = correctIdx;
-      } else {
-        const wrong = validChoices.filter(i => i !== correctIdx);
+      if (Math.random() < accuracy && validChoices.includes(correctIdx)) choice = correctIdx;
+      else {
+        const wrong = validChoices.filter(j => j !== correctIdx);
         choice = wrong.length > 0 ? wrong[Math.floor(Math.random() * wrong.length)] : validChoices[0];
       }
       state.audienceTally[choice]++;
@@ -911,40 +941,162 @@ function useAudience() {
     }, delay);
   });
 
+  // Hard timeout — auto-close after 10 seconds
+  if (audienceIntervalId) clearInterval(audienceIntervalId);
+  audienceIntervalId = setInterval(() => {
+    const remaining = Math.max(0, Math.ceil((state.audienceExpiresAt - Date.now()) / 1000));
+    state.audienceRemaining = remaining;
+    if (remaining <= 0) {
+      clearInterval(audienceIntervalId);
+      audienceIntervalId = null;
+      // Auto-close when timer hits 0
+      finalizeAudienceVote();
+    } else {
+      render();
+    }
+  }, 250);
+
   render();
 }
 
-function onViewerVoteUpdate({ tally, voterCount, voters }) {
-  // Firebase viewer vote update — only merge into live tally if audience is active
-  state.viewerCount = voterCount;
-  if (!state.audienceActive) {
-    render();
-    return;
+function finalizeAudienceVote() {
+  // Lock votes, leave results displayed for player to review
+  if (state.roomId && window.firebaseSync) {
+    window.firebaseSync.setAudience({ active: false, expiresAt: state.audienceExpiresAt });
   }
-  // Rebuild tally by combining AI votes + viewer votes
-  const aiTally = [0, 0, 0, 0];
-  state.audienceVoters.forEach(v => { if (v.isAI) aiTally[v.choice]++; });
-  state.audienceTally = [
-    aiTally[0] + tally[0],
-    aiTally[1] + tally[1],
-    aiTally[2] + tally[2],
-    aiTally[3] + tally[3],
-  ];
-  // Rebuild non-AI voter list
-  const aiVoters = state.audienceVoters.filter(v => v.isAI);
-  const humanVoters = (voters || []).map(v => ({ name: v.name, choice: v.choice, isAI: false }));
-  state.audienceVoters = [...aiVoters, ...humanVoters];
+  audio.lifelineEnd();
+  // Keep audienceActive=true on host so modal stays open showing final results
+  // Player closes manually with Continue button
   render();
+}
+
+function onViewerVoteUpdate(_data) {
+  // Legacy callback — superseded by subscribeToAudienceVotes inside useAudience
 }
 
 function closeAudience() {
   if (!state.audienceActive) return;
   state.audienceActive = false;
   state.timerPaused = false;
+  if (audienceIntervalId) { clearInterval(audienceIntervalId); audienceIntervalId = null; }
   if (state.roomId && window.firebaseSync) {
-    window.firebaseSync.closeVoting();
+    window.firebaseSync.setAudience({ active: false });
   }
   render();
+}
+
+/* ---------- BROADCAST + INTENTS ---------- */
+function buildGameStateForBroadcast() {
+  // Snapshot of current game state for phones to mirror.
+  // Strip non-serializable bits.
+  if (!state.currentQuestion) return null;
+  const currentPlayer = state.currentPlayerIdx !== null ? state.players[state.currentPlayerIdx] : null;
+  return {
+    currentTier: state.currentTier,
+    currentQuestion: {
+      q: state.currentQuestion.q,
+      a: state.currentQuestion.a,
+      correct: state.currentQuestion.correct,
+      id: state.currentQuestion.id || null
+    },
+    currentPlayerViewerId: currentPlayer ? (currentPlayer.viewerId || null) : null,
+    currentPlayerName: currentPlayer ? currentPlayer.name : null,
+    timerRemaining: state.timerRemaining,
+    timerPaused: state.timerPaused,
+    timerRunning: state.timerRunning,
+    selectedAnswer: state.selectedAnswer,
+    answerLocked: state.answerLocked,
+    revealing: state.revealing,
+    hiddenAnswers: state.hiddenAnswers || [],
+    lifelines: state.lifelines,
+    confirmingFinal: state.confirmingFinal,
+    lifelineEnded: state.lifelineEnded,
+    continuePrompt: state.continuePrompt,
+    activeLifeline: state.lifelineActiveType,
+    safetyNetsEnabled: state.safetyNetsEnabled,
+    players: state.players.map(p => ({
+      name: p.name, eliminated: p.eliminated,
+      correctCount: p.correctTiers.length,
+      viewerId: p.viewerId
+    }))
+  };
+}
+
+function broadcastGameState() {
+  if (!state.roomId || !window.firebaseSync || state.screen !== 'game') return;
+  const gs = buildGameStateForBroadcast();
+  if (gs) window.firebaseSync.setGameState(gs);
+}
+
+function setupIntentListener() {
+  if (state.intentListenerSetup) return;
+  if (!window.firebaseSync) return;
+  window.firebaseSync.subscribeToIntents((intent, intentId) => {
+    handleIntent(intent);
+    window.firebaseSync.consumeIntent(intentId);
+  });
+  state.intentListenerSetup = true;
+}
+
+function handleIntent(intent) {
+  if (!intent) return;
+  // Only allow intents from the current active player
+  const currentPlayer = state.currentPlayerIdx !== null ? state.players[state.currentPlayerIdx] : null;
+  const fromActivePlayer = currentPlayer && currentPlayer.viewerId === intent.from;
+
+  // For Ask the Audience, votes go through castAudienceVote, not intents
+  switch (intent.type) {
+    case 'select':
+      if (!fromActivePlayer) return;
+      selectAnswer(intent.payload.idx);
+      break;
+    case 'final-answer':
+      if (!fromActivePlayer) return;
+      // Phone wants to lock in — open the confirm flow (same as local FINAL ANSWER button)
+      state.selectedAnswer = intent.payload.idx;
+      openFinalConfirm();
+      break;
+    case 'confirm-yes':
+      if (!fromActivePlayer) return;
+      confirmYes();
+      break;
+    case 'confirm-no':
+      if (!fromActivePlayer) return;
+      confirmNo();
+      break;
+    case 'walk-away':
+      if (!fromActivePlayer) return;
+      endGame(false, 'walkaway');
+      break;
+    case 'lifeline-fifty':
+      if (!fromActivePlayer) return;
+      useFiftyFifty();
+      break;
+    case 'lifeline-google':
+      if (!fromActivePlayer) return;
+      useGoogleSearch();
+      break;
+    case 'lifeline-ai':
+      if (!fromActivePlayer) return;
+      useAskAI();
+      break;
+    case 'lifeline-audience':
+      if (!fromActivePlayer) return;
+      useAudience();
+      break;
+    case 'continue-yes':
+      if (!fromActivePlayer) return;
+      continueChosen();
+      break;
+    case 'continue-walk':
+      if (!fromActivePlayer) return;
+      walkAwayChosen();
+      break;
+    case 'resume-after-lifeline':
+      if (!fromActivePlayer) return;
+      resumeAfterLifeline();
+      break;
+  }
 }
 
 /* ---------- RENDER ---------- */
@@ -955,6 +1107,7 @@ function render() {
   else if (state.screen === 'modeSelect') html = renderModeSelect();
   else if (state.screen === 'teamSetup') html = renderTeamSetup();
   else if (state.screen === 'themeSelect') html = renderThemeSelect();
+  else if (state.screen === 'roster') html = renderRoster();
   else if (state.screen === 'game') html = renderGame();
   else if (state.screen === 'result') html = renderResult();
   else if (state.screen === 'settings') html = renderSettings();
@@ -962,23 +1115,54 @@ function render() {
   app.innerHTML = html;
   attachEvents();
   if (state.screen === 'game' && state.mode === 'single' && !state.answerLocked && !state.confirmingFinal) saveCurrentGame();
-  // Render QR code if game screen has qr panel
-  if (state.screen === 'game' && state.roomId) renderQRCode();
+  // Render QR codes whenever roomId is set
+  if (state.roomId) renderAllQRCodes();
+  // Broadcast game state to phones
+  if (state.screen === 'game') broadcastGameState();
 }
 
-function renderQRCode() {
-  const target = document.getElementById('qr-canvas');
-  if (!target || target.dataset.rendered === state.roomId) return;
-  target.innerHTML = '';
-  try {
-    const base = window.location.href.replace(/index\.html.*$/, '').replace(/#.*$/, '').replace(/\?.*$/, '');
-    const viewerUrl = base + (base.endsWith('/') ? '' : '/') + 'viewer.html#room=' + state.roomId;
-    new QRCode(target, { text: viewerUrl, width: 160, height: 160, colorDark: '#000', colorLight: '#fff', correctLevel: QRCode.CorrectLevel.M });
-    target.dataset.rendered = state.roomId;
-  } catch (e) { target.innerHTML = '<div style="color:#aaa;font-size:0.8rem">QR render error</div>'; }
+function renderAllQRCodes() {
+  document.querySelectorAll('[data-qr-target]').forEach(el => {
+    if (el.dataset.rendered === state.roomId) return;
+    el.innerHTML = '';
+    try {
+      const base = window.location.href.replace(/index\.html.*$/, '').replace(/#.*$/, '').replace(/\?.*$/, '');
+      const viewerUrl = base + (base.endsWith('/') ? '' : '/') + 'viewer.html#room=' + state.roomId;
+      const size = parseInt(el.dataset.qrSize || '160', 10);
+      new QRCode(el, { text: viewerUrl, width: size, height: size, colorDark: '#000', colorLight: '#fff', correctLevel: QRCode.CorrectLevel.M });
+      el.dataset.rendered = state.roomId;
+    } catch (e) { el.innerHTML = '<div style="color:#aaa;font-size:0.8rem">QR error</div>'; }
+  });
 }
 
 function renderMenu() {
+  let lobbyBlock = '';
+  if (state.firebaseStatus === 'connected' && state.roomId) {
+    const viewerCount = state.viewerCount;
+    const list = Object.values(state.lobbyViewers || {})
+      .filter(v => !v.isLocal && v.connected)
+      .map(v => `<span style="display:inline-block;background:rgba(187,107,217,0.2);border:1px solid var(--team);color:var(--team-glow);padding:0.2rem 0.6rem;border-radius:50px;font-family:Orbitron;font-size:0.75rem;margin:0.15rem">${escapeHtml(v.name)}</span>`)
+      .join('');
+    lobbyBlock = `<div class="qr-panel" style="max-width:340px;width:100%;margin-top:1rem">
+      <div class="title">📱 Live Lobby — Viewers Can Join Now</div>
+      <div data-qr-target data-qr-size="160" class="qr-canvas"></div>
+      <div class="code">${state.roomId}</div>
+      <div style="font-family:monospace;font-size:0.75rem;color:var(--dim);margin:0.4rem 0;word-break:break-all">viewer.html#room=${state.roomId}</div>
+      <div class="viewer-count">${viewerCount} connected</div>
+      ${list ? `<div style="margin-top:0.6rem">${list}</div>` : ''}
+    </div>`;
+  } else if (state.firebaseStatus === 'connecting') {
+    lobbyBlock = `<div class="qr-panel" style="max-width:340px;width:100%;margin-top:1rem;border-color:var(--gold)"><div class="title" style="color:var(--gold)">📡 Connecting to Firebase...</div></div>`;
+  } else if (state.firebaseStatus === 'failed') {
+    lobbyBlock = `<div class="qr-panel" style="max-width:340px;width:100%;margin-top:1rem;border-color:var(--wrong)">
+      <div class="title" style="color:var(--wrong-glow)">⚠️ Firebase Connection Failed</div>
+      <div style="font-size:0.78rem;color:var(--dim);margin-top:0.4rem;text-align:left;line-height:1.4">
+        Press <b>F12</b> → Console. Look for <b>[firebaseSync]</b> messages.<br>
+        Common: missing <code style="color:var(--gold)">databaseURL</code> in firebase.js, or rules denying writes.
+      </div>
+      <button class="btn small" data-action="firebase-debug" style="margin-top:0.5rem">Show Status</button>
+    </div>`;
+  }
   return `
     <div class="menu-screen">
       <div class="hero">
@@ -991,6 +1175,7 @@ function renderMenu() {
         <button class="btn ghost" data-action="scores">High Scores</button>
         <button class="btn ghost" data-action="settings">Settings</button>
       </div>
+      ${lobbyBlock}
       <div class="footer-mini">four lifelines · fifteen questions · one million dollars</div>
     </div>
   `;
@@ -1089,6 +1274,106 @@ function modeLabelFor(m) {
   return {'single':'Single Player','host':'Host Mode','coop':'Team Co-op','versus':'Versus'}[m] || '';
 }
 
+/* ---------- ROSTER SCREEN ---------- */
+// Number of player slots required for the chosen mode
+function rosterSlotCount() {
+  if (state.mode === 'single') return 1;
+  // For coop/versus, default to setupPlayerCount or current roster size
+  return Math.max(2, state.roster.length || state.setupPlayerCount || 2);
+}
+
+function renderRoster() {
+  const slots = rosterSlotCount();
+  // Make sure roster array has the right length
+  while (state.roster.length < slots) state.roster.push({ source: 'local', name: '', viewerId: null, slot: state.roster.length });
+  while (state.roster.length > slots) state.roster.pop();
+
+  const availableViewers = Object.values(state.lobbyViewers || {})
+    .filter(v => !v.isLocal && v.connected);
+
+  // Build a Set of viewerIds already assigned to a slot
+  const usedViewerIds = new Set(state.roster.filter(r => r.source === 'viewer' && r.viewerId).map(r => r.viewerId));
+
+  const slotRows = state.roster.map((slot, i) => {
+    const sourceOptions = `
+      <select data-action="roster-source" data-slot="${i}" style="padding:0.5rem;background:rgba(255,255,255,0.08);border:1px solid var(--team);color:white;border-radius:4px;font-family:Rajdhani;font-size:0.9rem">
+        <option value="local" ${slot.source === 'local' ? 'selected' : ''}>Local (at PC)</option>
+        <option value="viewer" ${slot.source === 'viewer' ? 'selected' : ''}>From Phone</option>
+      </select>
+    `;
+    let inputOrPicker = '';
+    if (slot.source === 'local') {
+      inputOrPicker = `<input type="text" data-action="roster-name" data-slot="${i}" value="${escapeAttr(slot.name)}" placeholder="Player ${i+1} name" maxlength="20" style="flex:1;padding:0.5rem;background:rgba(255,255,255,0.08);border:1px solid var(--team);color:white;border-radius:4px;font-family:Rajdhani;font-size:0.95rem" />`;
+    } else {
+      const opts = availableViewers
+        .filter(v => !usedViewerIds.has(v.viewerId || getViewerKey(v)) || (slot.viewerId === (v.viewerId || getViewerKey(v))))
+        .map(v => {
+          const vid = getViewerKey(v);
+          return `<option value="${vid}" ${slot.viewerId === vid ? 'selected' : ''}>${escapeHtml(v.name)}</option>`;
+        }).join('');
+      inputOrPicker = `<select data-action="roster-viewer" data-slot="${i}" style="flex:1;padding:0.5rem;background:rgba(255,255,255,0.08);border:1px solid var(--team);color:white;border-radius:4px;font-family:Rajdhani;font-size:0.95rem">
+        <option value="">— pick a viewer —</option>
+        ${opts}
+      </select>`;
+    }
+    return `<div style="display:flex;gap:0.5rem;margin-bottom:0.5rem;align-items:center;flex-wrap:wrap">
+      <span style="font-family:Orbitron;font-size:0.75rem;color:var(--team-glow);min-width:2.5em">P${i+1}</span>
+      ${sourceOptions}
+      ${inputOrPicker}
+    </div>`;
+  }).join('');
+
+  // Roster validity: every slot must have a non-empty name (local) or chosen viewer (viewer)
+  const valid = state.roster.every(s => {
+    if (s.source === 'local') return s.name && s.name.trim().length > 0;
+    if (s.source === 'viewer') return !!s.viewerId;
+    return false;
+  });
+
+  // Audience preview — viewers not assigned
+  const audienceCount = availableViewers.filter(v => !usedViewerIds.has(getViewerKey(v))).length;
+
+  // Player count selector for team modes
+  let countBtns = '';
+  if (state.mode === 'coop' || state.mode === 'versus') {
+    countBtns = `<div style="display:flex;gap:0.5rem;margin-bottom:1rem">
+      ${[2,3,4].map(n => `<button class="pc-btn ${slots===n?'active':''}" data-action="roster-set-count" data-n="${n}">${n} Players</button>`).join('')}
+    </div>`;
+  }
+
+  return `
+    <div class="menu-screen">
+      <div class="hero">
+        <h1 style="font-size:clamp(1.3rem,4vw,2rem)">Pick Your Players</h1>
+        <div class="sub">${modeLabelFor(state.mode)}</div>
+      </div>
+      <div class="setup-card" style="max-width:540px">
+        <h3>Roster</h3>
+        ${countBtns}
+        ${slotRows}
+        <div style="font-size:0.85rem;color:var(--dim);margin-top:0.6rem">
+          ${availableViewers.length} viewer${availableViewers.length===1?'':'s'} connected · ${audienceCount} will be in the audience
+        </div>
+        <div style="margin-top:1rem;text-align:center">
+          <button class="btn team" data-action="roster-confirm" ${valid?'':'disabled'}>Start Game</button>
+        </div>
+      </div>
+      <button class="btn ghost compact" data-action="theme-select-back" style="margin-top:0.7rem">Back</button>
+    </div>
+  `;
+}
+
+function getViewerKey(viewer) {
+  // viewer might already have viewerId on it, or we look it up by name match
+  if (viewer && viewer.viewerId) return viewer.viewerId;
+  for (const k in state.lobbyViewers) {
+    const v = state.lobbyViewers[k];
+    if (v === viewer) return k;
+    if (v && viewer && v.name === viewer.name && v.lastSeen === viewer.lastSeen) return k;
+  }
+  return null;
+}
+
 function renderPrizeLadder() {
   let rows = '';
   for (let i = PRIZE_LADDER.length - 1; i >= 0; i--) {
@@ -1110,9 +1395,20 @@ function renderPlayersPanel() {
     const classes = ['player-row'];
     if (i === state.currentPlayerIdx) classes.push('current');
     if (p.eliminated) classes.push('eliminated');
+    // Mark phone players whose viewer disconnected
+    let connectionStatus = '';
+    if (p.viewerId && state.lobbyViewers[p.viewerId] && !state.lobbyViewers[p.viewerId].connected) {
+      connectionStatus = ' <span style="color:var(--wrong);font-size:0.7rem">⚠ OFFLINE</span>';
+    }
+    const replaceBtn = !p.eliminated
+      ? `<button class="host-btn" style="font-size:0.6rem;padding:0.2rem 0.4rem;margin-left:0.4rem" data-action="open-replace" data-slot="${i}">REPLACE</button>`
+      : '';
     return `<div class="${classes.join(' ')}">
-      <span>${escapeHtml(p.name)}</span>
-      <span class="tally">${p.correctTiers.length} ✓</span>
+      <span>${escapeHtml(p.name)}${connectionStatus}</span>
+      <span style="display:flex;align-items:center;gap:0.3rem">
+        <span class="tally">${p.correctTiers.length} ✓</span>
+        ${replaceBtn}
+      </span>
     </div>`;
   }).join('');
   return `<div class="players-panel">
@@ -1310,14 +1606,64 @@ function renderAudienceModal() {
       </div>
     </div>`;
   }).join('');
-  const expected = 10 + state.viewerCount;
+  const remaining = Math.max(0, Math.ceil((state.audienceExpiresAt - Date.now()) / 1000));
+  const expectedTotal = 10 + state.viewerCount;
+  const timerExpired = remaining <= 0;
+  const timerHTML = timerExpired
+    ? '<div class="status success" style="margin:0.7rem 0">Voting closed.</div>'
+    : `<div class="audience-timer-big" style="font-family:Orbitron;font-size:2.4rem;font-weight:900;color:${remaining<=3?'var(--wrong-glow)':'var(--gold)'};text-align:center;margin:0.6rem 0">${remaining}s</div>`;
+
   return `<div class="overlay"><div class="modal">
     <h2>Ask the Audience</h2>
+    ${timerHTML}
     <p>10 AI voters + ${state.viewerCount} live viewer${state.viewerCount===1?'':'s'} voting...</p>
-    <div class="audience-progress"><b>${total}</b> / ${expected} votes in</div>
+    <div class="audience-progress"><b>${total}</b> / ${expectedTotal} votes in</div>
     <div class="audience-grid">${bars}</div>
     <div class="modal-btns">
-      <button class="btn confirm" data-action="close-audience">CONTINUE</button>
+      <button class="btn confirm" data-action="close-audience" ${timerExpired ? '' : 'disabled'}>${timerExpired ? 'CONTINUE' : 'WAIT FOR TIMER'}</button>
+    </div>
+  </div></div>`;
+}
+
+function renderReplaceModal() {
+  if (!state.showReplaceModal || state.replaceTargetSlot === null) return '';
+  const targetPlayer = state.players[state.replaceTargetSlot];
+  if (!targetPlayer) return '';
+
+  // Pool of replacement candidates: connected viewers in audience role,
+  // or eliminated players (in case host wants to bring someone back)
+  const candidates = [];
+  // Connected non-player viewers
+  Object.values(state.lobbyViewers || {}).forEach(v => {
+    if (v.isLocal) return;
+    if (!v.connected) return;
+    if (v.role === 'player') return; // already a player
+    candidates.push({
+      type: 'viewer',
+      viewerId: v.viewerId,
+      name: v.name,
+      label: v.name + ' (audience)'
+    });
+  });
+
+  const candidateList = candidates.length === 0
+    ? '<p class="notice">No available replacements (no connected audience members).</p>'
+    : '<div style="display:flex;flex-direction:column;gap:0.4rem;margin:0.6rem 0">' +
+      candidates.map((c, i) =>
+        `<button class="btn compact team" data-action="do-replace" data-cand-idx="${i}" style="text-align:left;justify-content:flex-start">
+          ${escapeHtml(c.label)}
+        </button>`
+      ).join('') + '</div>';
+
+  // Stash candidates on state for the action handler
+  state._replaceCandidates = candidates;
+
+  return `<div class="overlay"><div class="modal">
+    <h2>Replace ${escapeHtml(targetPlayer.name)}?</h2>
+    <p>Pick a replacement. The new player inherits all correct answers (${targetPlayer.correctTiers.length} so far).</p>
+    ${candidateList}
+    <div class="modal-btns">
+      <button class="btn ghost" data-action="cancel-replace">Cancel</button>
     </div>
   </div></div>`;
 }
@@ -1370,6 +1716,7 @@ function renderGame() {
     ${renderLifelineEndModal()}
     ${renderContinueModal()}
     ${renderAudienceModal()}
+    ${renderReplaceModal()}
   `;
 }
 
@@ -1463,23 +1810,55 @@ function escapeAttr(s) { return escapeHtml(s); }
 function attachEvents() {
   document.querySelectorAll('[data-action]').forEach(el => {
     const action = el.dataset.action;
-    if (action === 'player-name') {
+    if (action === 'player-name' || action === 'roster-name') {
       el.addEventListener('input', handleInput);
+    } else if (action === 'roster-source' || action === 'roster-viewer') {
+      el.addEventListener('change', handleRosterChange);
     } else {
       el.addEventListener('click', handleAction);
     }
   });
 }
 
+function handleRosterChange(e) {
+  const action = e.currentTarget.dataset.action;
+  const slot = parseInt(e.currentTarget.dataset.slot, 10);
+  if (action === 'roster-source') {
+    state.roster[slot].source = e.currentTarget.value;
+    if (state.roster[slot].source === 'local') state.roster[slot].viewerId = null;
+    if (state.roster[slot].source === 'viewer') state.roster[slot].name = '';
+    render();
+  } else if (action === 'roster-viewer') {
+    state.roster[slot].viewerId = e.currentTarget.value || null;
+    render();
+  }
+}
+
 function handleInput(e) {
-  const idx = parseInt(e.currentTarget.dataset.idx, 10);
-  state.setupPlayers[idx] = e.currentTarget.value;
-  // Lightweight re-render to update button enabled state — but don't blow up the input focus
-  const confirmBtn = document.querySelector('[data-action="confirm-team-setup"]');
-  if (confirmBtn) {
-    const canStart = state.setupPlayers.every(n => n.trim().length > 0);
-    if (canStart) confirmBtn.removeAttribute('disabled');
-    else confirmBtn.setAttribute('disabled', '');
+  const action = e.currentTarget.dataset.action;
+  const idx = parseInt(e.currentTarget.dataset.idx || e.currentTarget.dataset.slot, 10);
+  if (action === 'roster-name') {
+    state.roster[idx].name = e.currentTarget.value;
+    // Update Start button without full re-render
+    const confirmBtn = document.querySelector('[data-action="roster-confirm"]');
+    if (confirmBtn) {
+      const valid = state.roster.every(s => {
+        if (s.source === 'local') return s.name && s.name.trim().length > 0;
+        if (s.source === 'viewer') return !!s.viewerId;
+        return false;
+      });
+      if (valid) confirmBtn.removeAttribute('disabled');
+      else confirmBtn.setAttribute('disabled', '');
+    }
+  } else {
+    // Legacy player-name input from teamSetup
+    state.setupPlayers[idx] = e.currentTarget.value;
+    const confirmBtn = document.querySelector('[data-action="confirm-team-setup"]');
+    if (confirmBtn) {
+      const canStart = state.setupPlayers.every(n => n.trim().length > 0);
+      if (canStart) confirmBtn.removeAttribute('disabled');
+      else confirmBtn.setAttribute('disabled', '');
+    }
   }
 }
 
@@ -1497,9 +1876,21 @@ function fullCleanup() {
   state.lifelineEnded = false;
   state.continuePrompt = false;
   state.audienceActive = false;
+  state.showReplaceModal = false;
+  state.replaceTargetSlot = null;
+  // Reset room back to lobby phase (keep the room alive for next game)
   if (state.roomId && window.firebaseSync) {
-    window.firebaseSync.closeRoom();
-    state.roomId = null;
+    window.firebaseSync.setMeta({ phase: 'lobby', mode: null, theme: null });
+    // Clear all viewer roles back to unassigned
+    Object.keys(state.lobbyViewers || {}).forEach(vid => {
+      const v = state.lobbyViewers[vid];
+      if (v.isLocal) return;
+      window.firebaseSync.setViewerRole(vid, 'unassigned', null, null);
+    });
+    // Clear any audience state
+    window.firebaseSync.setAudience({ active: false });
+    // Clear game state
+    window.firebaseSync.setGameState(null);
   }
 }
 
@@ -1518,8 +1909,8 @@ function handleAction(e) {
     case 'play': state.screen = 'modeSelect'; render(); break;
     case 'mode-single': state.mode = 'single'; state.screen = 'themeSelect'; render(); break;
     case 'mode-host': state.mode = 'host'; state.screen = 'themeSelect'; render(); break;
-    case 'mode-coop': state.mode = 'coop'; state.setupPlayers = ['',''];  state.setupPlayerCount = 2; state.screen = 'teamSetup'; render(); break;
-    case 'mode-versus': state.mode = 'versus'; state.setupPlayers = ['',''];  state.setupPlayerCount = 2; state.screen = 'teamSetup'; render(); break;
+    case 'mode-coop': state.mode = 'coop'; state.setupPlayerCount = 2; state.screen = 'themeSelect'; render(); break;
+    case 'mode-versus': state.mode = 'versus'; state.setupPlayerCount = 2; state.screen = 'themeSelect'; render(); break;
     case 'mode-select': state.screen = 'modeSelect'; render(); break;
     case 'set-player-count':
       const n = parseInt(btn.dataset.n, 10);
@@ -1537,9 +1928,43 @@ function handleAction(e) {
       render();
       break;
     case 'theme':
-      const opts = { safetyNetsEnabled: state.safetyNetsEnabled };
-      if (isTeamMode()) opts.players = state.setupPlayers.map(n => n.trim());
-      startNewGame(state.mode, btn.dataset.theme, opts);
+      state.theme = btn.dataset.theme;
+      state.roster = [];
+      if (state.mode === 'single') state.setupPlayerCount = 1;
+      else if (!state.setupPlayerCount || state.setupPlayerCount < 2) state.setupPlayerCount = 2;
+      state.screen = 'roster';
+      render();
+      break;
+    case 'theme-select-back':
+      state.screen = 'themeSelect';
+      render();
+      break;
+    case 'roster-set-count':
+      const newCount = parseInt(btn.dataset.n, 10);
+      state.setupPlayerCount = newCount;
+      while (state.roster.length > newCount) state.roster.pop();
+      render();
+      break;
+    case 'roster-confirm':
+      const rosterOpts = {
+        safetyNetsEnabled: state.safetyNetsEnabled,
+        roster: state.roster.map((r, i) => ({
+          source: r.source,
+          viewerId: r.source === 'viewer' ? r.viewerId : null,
+          name: r.source === 'local' ? r.name.trim() : (state.lobbyViewers[r.viewerId] ? state.lobbyViewers[r.viewerId].name : ('Player ' + (i+1))),
+          slot: i
+        }))
+      };
+      if (state.roomId && window.firebaseSync) {
+        Object.keys(state.lobbyViewers).forEach(vid => {
+          const v = state.lobbyViewers[vid];
+          if (v.isLocal) return;
+          const assignedSlot = rosterOpts.roster.findIndex(r => r.viewerId === vid);
+          if (assignedSlot >= 0) window.firebaseSync.setViewerRole(vid, 'player', assignedSlot, null);
+          else window.firebaseSync.setViewerRole(vid, 'audience', null, null);
+        });
+      }
+      startNewGame(state.mode, state.theme, rosterOpts);
       break;
     case 'continue': resumeSavedGame(); break;
     case 'scores': state.screen = 'scores'; render(); break;
@@ -1588,6 +2013,51 @@ function handleAction(e) {
     case 'host-wrong': hostMarkWrong(); break;
     case 'host-skip': loadQuestionForCurrentTier(false); break;
     case 'host-end': if (confirm('End the game now?')) endGame(false, 'walkaway'); break;
+
+    case 'open-replace':
+      state.replaceTargetSlot = parseInt(btn.dataset.slot, 10);
+      state.showReplaceModal = true;
+      // Pause timer while replacing
+      state.timerPaused = true;
+      render();
+      break;
+    case 'cancel-replace':
+      state.showReplaceModal = false;
+      state.replaceTargetSlot = null;
+      // Resume timer
+      if (state.timerRunning) state.timerPaused = false;
+      render();
+      break;
+    case 'do-replace':
+      const candIdx = parseInt(btn.dataset.candIdx, 10);
+      const candidates = state._replaceCandidates || [];
+      const cand = candidates[candIdx];
+      const targetSlot = state.replaceTargetSlot;
+      if (cand && targetSlot !== null && state.players[targetSlot]) {
+        const oldPlayer = state.players[targetSlot];
+        // Replace the player but inherit tally
+        state.players[targetSlot] = {
+          name: cand.name,
+          eliminated: false,
+          correctTiers: oldPlayer.correctTiers, // inherit
+          viewerId: cand.viewerId,
+          source: 'viewer'
+        };
+        // Update Firebase roles: new player becomes player, old viewer becomes audience (if they were a phone player)
+        if (state.roomId && window.firebaseSync) {
+          window.firebaseSync.setViewerRole(cand.viewerId, 'player', targetSlot, null);
+          if (oldPlayer.viewerId) {
+            window.firebaseSync.setViewerRole(oldPlayer.viewerId, 'audience', null, null);
+          }
+        }
+        // If this was the active player slot, refresh currentPlayerIdx
+        // (currentPlayerIdx tracks slot index, so it stays valid)
+      }
+      state.showReplaceModal = false;
+      state.replaceTargetSlot = null;
+      if (state.timerRunning) state.timerPaused = false;
+      render();
+      break;
 
     case 'firebase-debug':
       if (window.firebaseSync) {
@@ -1648,10 +2118,40 @@ async function init() {
   if ('speechSynthesis' in window) { window.speechSynthesis.getVoices(); window.speechSynthesis.onvoiceschanged = () => {}; }
   audio.init();
   audio.setEnabled(state.audioEnabled);
-  // Pre-init Firebase in the background so audience lifeline is fast when triggered
-  if (window.firebaseSync && window.firebaseSync.isConfigured()) {
-    window.firebaseSync.init();
+  // Set up lobby room on app load (so viewers can join from main menu)
+  setupLobbyRoom();
+  render();
+}
+
+async function setupLobbyRoom() {
+  if (!window.firebaseSync || !window.firebaseSync.isConfigured()) {
+    state.firebaseStatus = 'unconfigured';
+    return;
   }
+  state.firebaseStatus = 'connecting';
+  render();
+  const code = await window.firebaseSync.createRoom();
+  if (!code) {
+    state.firebaseStatus = 'failed';
+    console.error('[game] Lobby room creation failed. Run window.firebaseSync.getStatus() to see why.');
+    render();
+    return;
+  }
+  state.roomId = code;
+  state.firebaseStatus = 'connected';
+  state.lobbyRoomReady = true;
+  // Subscribe to viewers list
+  window.firebaseSync.subscribeToViewers((viewers) => {
+    // Inject viewerId into each entry so downstream code can reference it
+    const enriched = {};
+    Object.keys(viewers || {}).forEach(k => {
+      enriched[k] = { ...viewers[k], viewerId: k };
+    });
+    state.lobbyViewers = enriched;
+    state.viewerCount = Object.values(enriched).filter(v => !v.isLocal && v.connected).length;
+    render();
+  });
+  console.log('[game] Lobby room ready:', code);
   render();
 }
 

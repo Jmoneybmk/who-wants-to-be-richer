@@ -1422,18 +1422,23 @@ function renderPlayersPanel() {
     if (p.eliminated) classes.push('eliminated');
     // Mark phone players whose viewer disconnected
     let connectionStatus = '';
-    if (p.viewerId && state.lobbyViewers[p.viewerId] && !state.lobbyViewers[p.viewerId].connected) {
-      connectionStatus = ' <span style="color:var(--wrong);font-size:0.7rem">⚠ OFFLINE</span>';
+    const isPhonePlayer = p.viewerId && state.lobbyViewers[p.viewerId];
+    const phoneOffline = isPhonePlayer && !state.lobbyViewers[p.viewerId].connected;
+    if (phoneOffline) {
+      connectionStatus = ' <span style="color:var(--wrong);font-size:0.7rem;margin-left:0.3rem">⚠ OFFLINE</span>';
     }
-    const replaceBtn = !p.eliminated
-      ? `<button class="host-btn" style="font-size:0.6rem;padding:0.2rem 0.4rem;margin-left:0.4rem" data-action="open-replace" data-slot="${i}">REPLACE</button>`
-      : '';
-    return `<div class="${classes.join(' ')}">
-      <span>${escapeHtml(p.name)}${connectionStatus}</span>
-      <span style="display:flex;align-items:center;gap:0.3rem">
+    const actionBtns = !p.eliminated ? `
+      <div style="display:flex;gap:0.25rem;margin-top:0.35rem">
+        <button class="host-btn" data-action="open-replace" data-slot="${i}" style="font-size:0.65rem;padding:0.3rem 0.5rem;flex:1">REPLACE</button>
+        <button class="host-btn" data-action="take-over" data-slot="${i}" style="font-size:0.65rem;padding:0.3rem 0.5rem;flex:1">TAKE OVER</button>
+      </div>
+    ` : '';
+    return `<div class="${classes.join(' ')}" style="flex-direction:column;align-items:stretch">
+      <div style="display:flex;justify-content:space-between;align-items:center;width:100%">
+        <span>${escapeHtml(p.name)}${connectionStatus}</span>
         <span class="tally">${p.correctTiers.length} ✓</span>
-        ${replaceBtn}
-      </span>
+      </div>
+      ${actionBtns}
     </div>`;
   }).join('');
   return `<div class="players-panel">
@@ -2046,10 +2051,29 @@ function handleAction(e) {
       state.timerPaused = true;
       render();
       break;
+    case 'take-over':
+      const takeoverSlot = parseInt(btn.dataset.slot, 10);
+      const targetForTakeover = state.players[takeoverSlot];
+      if (!targetForTakeover) break;
+      const newName = prompt('Take over as host. Enter your name:', 'Host');
+      if (!newName || !newName.trim()) break;
+      const oldViewerId = targetForTakeover.viewerId;
+      state.players[takeoverSlot] = {
+        name: newName.trim(),
+        eliminated: false,
+        correctTiers: targetForTakeover.correctTiers, // inherit tally
+        viewerId: null,
+        source: 'local'
+      };
+      // Free up the old phone-player's role so they go back to audience
+      if (oldViewerId && state.roomId && window.firebaseSync) {
+        window.firebaseSync.setViewerRole(oldViewerId, 'audience', null, null);
+      }
+      render();
+      break;
     case 'cancel-replace':
       state.showReplaceModal = false;
       state.replaceTargetSlot = null;
-      // Resume timer
       if (state.timerRunning) state.timerPaused = false;
       render();
       break;
@@ -2060,7 +2084,6 @@ function handleAction(e) {
       const targetSlot = state.replaceTargetSlot;
       if (cand && targetSlot !== null && state.players[targetSlot]) {
         const oldPlayer = state.players[targetSlot];
-        // Replace the player but inherit tally
         state.players[targetSlot] = {
           name: cand.name,
           eliminated: false,
@@ -2068,15 +2091,12 @@ function handleAction(e) {
           viewerId: cand.viewerId,
           source: 'viewer'
         };
-        // Update Firebase roles: new player becomes player, old viewer becomes audience (if they were a phone player)
         if (state.roomId && window.firebaseSync) {
           window.firebaseSync.setViewerRole(cand.viewerId, 'player', targetSlot, null);
           if (oldPlayer.viewerId) {
             window.firebaseSync.setViewerRole(oldPlayer.viewerId, 'audience', null, null);
           }
         }
-        // If this was the active player slot, refresh currentPlayerIdx
-        // (currentPlayerIdx tracks slot index, so it stays valid)
       }
       state.showReplaceModal = false;
       state.replaceTargetSlot = null;

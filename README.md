@@ -1,23 +1,40 @@
 # Who Wants to Be a Millionaire — Internet Edition
 
-A browser-based game modeled after the classic show, with three "internet-themed" lifelines: **50/50**, **Google Search** (15s), and **Ask the AI** (25s). Runs as a single page — no backend, no build step, no external audio files.
+A browser-based, multi-device game show modeled on the classic, with internet-themed lifelines and live audience voting from phones.
 
 ---
 
 ## Table of Contents
 
-1. [File Structure](#file-structure)
-2. [Running the Game](#running-the-game)
-3. [Pack Design Philosophy](#pack-design-philosophy)
-4. [Balancing Difficulty — Full Per-Tier Guide](#balancing-difficulty--full-per-tier-guide)
-5. [Adding Questions](#adding-questions)
-6. [Adding a New Theme](#adding-a-new-theme)
-7. [Code Walkthrough — `index.html`](#code-walkthrough--indexhtml)
-8. [Audio System](#audio-system)
-9. [Common Modifications](#common-modifications)
-10. [Upgrade Ideas](#upgrade-ideas)
-11. [Known Quirks](#known-quirks)
-12. [Troubleshooting](#troubleshooting)
+1. [What It Does](#what-it-does)
+2. [File Structure](#file-structure)
+3. [Running the Game](#running-the-game)
+4. [Firebase Setup (Required for Multiplayer)](#firebase-setup-required-for-multiplayer)
+5. [Game Modes](#game-modes)
+6. [Lifelines](#lifelines)
+7. [The Lobby System (How Phone Players Join)](#the-lobby-system)
+8. [In-Game Host Controls](#in-game-host-controls)
+9. [Pack Design Philosophy](#pack-design-philosophy)
+10. [Adding Questions](#adding-questions)
+11. [Adding a New Theme Pack](#adding-a-new-theme-pack)
+12. [Code Walkthrough](#code-walkthrough)
+13. [Audio System](#audio-system)
+14. [Common Modifications](#common-modifications)
+15. [Upgrade Ideas](#upgrade-ideas)
+16. [Known Quirks](#known-quirks)
+17. [Troubleshooting](#troubleshooting)
+
+---
+
+## What It Does
+
+Local single-player Millionaire that scales up to:
+- Multiple phone players in **Co-op** or **Versus** mode, joined via QR code
+- A live audience that votes from their phones during "Ask the Audience"
+- A host PC that displays everything for streaming
+- A "Host Mode" overlay that gives the host manual control over any sub-mode (timer, judging, etc.)
+
+Phones aren't required. Single-player works offline. Multiplayer needs Firebase set up once (~10 min, free forever for this scale).
 
 ---
 
@@ -25,347 +42,390 @@ A browser-based game modeled after the classic show, with three "internet-themed
 
 ```
 .
-├── index.html      # Main game: HTML, CSS, game logic, audio synthesis. Open this to play.
-├── questions.js    # All question/answer data. Edit this to add content.
-└── README.md       # This file.
+├── index.html      # Main game (host PC view)
+├── viewer.html     # Phone-side page (what viewers/players see when they scan QR)
+├── audio.js        # Web Audio synthesis (BGM + 14 SFX)
+├── firebase.js     # Multiplayer sync layer (lobby, intents, audience votes)
+├── questions.js    # All question/answer data
+└── README.md       # This file
 ```
 
-Both files must be in the **same folder**. `index.html` loads `questions.js` via:
-
-```html
-<script src="questions.js"></script>
-```
-
-The game then reads from a global `window.QUESTION_PACKS` object defined inside `questions.js`.
+All six files must live in the **same folder**. `index.html` loads `audio.js`, `firebase.js`, and `questions.js`. `viewer.html` loads `firebase.js`.
 
 ---
 
 ## Running the Game
 
-### Option 1 — Open directly (easiest)
-Double-click `index.html`. Works in any modern browser. Saves, high scores, and settings persist via `localStorage`.
+### Option 1 — Single player on one device
+Double-click `index.html`. Saves, scores, and settings persist via `localStorage`. No network needed.
 
-### Option 2 — Local server (cleaner)
-From a terminal in the folder:
-```bash
-# Python 3
-python -m http.server 8000
-# OR Node
-npx serve .
-```
-Then open `http://localhost:8000`.
+### Option 2 — Multiplayer (phones joining via QR)
+You need to serve the files over HTTP, not `file://`. Phones can't reach `file://` paths on your computer.
 
-### Option 3 — In the Claude artifact environment
-Upload both files together; the game uses Claude's artifact storage API for persistence.
+**Easiest free options:**
 
-> **Storage fallback chain:** `window.storage` (Claude) → `localStorage` (normal browser) → in-memory (private / disabled storage). The game never crashes from missing storage — it just won't persist across sessions in the last case.
+- **Same WiFi only** — run a local server on your PC and access via your local IP:
+  ```bash
+  python -m http.server 8000
+  # then open http://YOUR_LOCAL_IP:8000/ on your PC
+  # find your IP via `ipconfig` (Windows) or `ifconfig` (Mac/Linux)
+  # phones on the same WiFi can scan the QR
+  ```
+- **Public (works for online viewers)** — drag your folder to https://app.netlify.com/drop. Free, no account needed for the basic tier. You get a public URL like `https://your-game.netlify.app/`. QR works for anyone in the world.
+- **GitHub Pages** — push folder to a repo, enable Pages in settings.
+- **Tunnel** — `cloudflared tunnel --url http://localhost:8000` gives you a temporary public URL without hosting setup.
+
+---
+
+## Firebase Setup (Required for Multiplayer)
+
+Without this, the game still works for single-player and local team modes (everyone sharing one screen). With it, phone players can join, audience can vote live, and viewer count shows in the lobby.
+
+**One-time setup, ~10 minutes:**
+
+1. Go to https://console.firebase.google.com/ → **Add project** → name it (anything) → **Continue**. Skip Analytics.
+2. Click **</>** ("Add app" web icon) → register name → skip hosting → **Register**.
+3. **Build → Realtime Database** in the left sidebar → **Create Database** → any location → **Start in test mode** → **Enable**.
+4. At the top of the database page, copy the URL — looks like `https://your-project-default-rtdb.firebaseio.com/`. **You need this.**
+5. Open the gear icon → **Project Settings** → scroll to "Your apps" → copy the entire `firebaseConfig` object.
+6. Open `firebase.js`. Find the `firebaseConfig` block at the top. **Paste your config**, replacing the empty/commented one. **Make sure every line is uncommented (no `//` prefix), and `databaseURL` is included.**
+7. In Realtime Database → **Rules** tab, set rules to:
+   ```json
+   { "rules": { ".read": true, ".write": true } }
+   ```
+   Click **Publish**.
+8. Save `firebase.js`. Reload the game. You should see a QR + 6-character room code on the main menu, and the message changes from "Connecting" or "Failed" to a working lobby.
+
+If anything fails, press F12 → Console. Messages prefixed `[firebaseSync]` will tell you exactly what's wrong (most common: `databaseURL` missing, or rules denying writes).
+
+---
+
+## Game Modes
+
+After clicking **Play**, you choose a mode:
+
+| Mode | Players | Pot | Loss Behavior |
+|---|---|---|---|
+| **Single Player** | 1 | Yours | Drop to last safety net (or $0 if safety nets off) |
+| **Host Mode** | 0–4 | Variable | Manual judgment — host runs the whole show |
+| **Team Co-op** | 2–4 | **Shared, split equally including eliminated players** | Wrong answer eliminates the active player; team continues with remaining; if all eliminated, game ends |
+| **Versus** | 2–4 | **Shared, but only survivors get a share** | Last one standing takes the full pot. If multiple survive to Q15, pot splits **proportionally by correct-answer count** |
+
+### Mode-specific rules
+
+- **Wrong answer in team modes** → that player is eliminated, next player gets a **fresh question from the same tier**, game continues
+- **Turn order**: Random per round. Once everyone in the rotation has played, the rotation reshuffles (no repeats until everyone's had a turn)
+- **Safety nets toggle** (on theme select screen): OFF = after every correct answer in single-player, you're prompted "Continue or Walk Away?" — wrong answer with safety nets off = $0
+- **Host Mode** is a separate mode that overrides the others — host clicks every button manually (start timer, mark correct/wrong, advance, etc.)
+
+---
+
+## Lifelines
+
+All lifelines: **one use per game**, **shared in team modes**.
+
+| Lifeline | What it does |
+|---|---|
+| **50:50** | Hides 2 wrong answers |
+| **Google (20s)** | Opens a blank Google tab on host PC, 20-second timer. Phone players verbally tell host what to search |
+| **Ask AI (20s)** | Opens blank ChatGPT tab on host PC, same as above |
+| **Ask the Audience** | Hard 10-second vote. 10 AI voters with mixed accuracies (~53% mean) + every connected viewer can vote from their phone. Results show as classic-style percentage bars after the timer expires |
+
+The browser may not be able to auto-close the Google/Ask AI tabs (cross-origin restriction). The game compensates: when the lifeline timer hits 0, the host shows a **RESUME** modal with a loud chime. The question timer stays paused until the player clicks RESUME, so no time is lost.
+
+---
+
+## The Lobby System
+
+The QR + 6-character room code appears on the **main menu**, before any game starts. Viewers scan or type the code to join.
+
+### How a viewer joins
+1. Scan QR (or visit `viewer.html` and type the 6-char code manually)
+2. Enter their name
+3. Land in the lobby — they wait for the host to start a game
+
+### What viewers can become
+
+After the host clicks **Play → mode → theme**, they hit the **Roster screen**:
+
+For each player slot, the host picks one of:
+- **Local (at PC)** — the host types a name; that player sits at the host's keyboard
+- **From Phone** — picks a connected viewer's name from a dropdown; that player plays from their phone
+
+Anyone not picked stays as **audience** — they see questions on their phone (read-only) and vote during Ask the Audience.
+
+### What phone players control during the game
+
+- Tap an answer to select it
+- Tap **FINAL ANSWER** → confirmation screen (YES/NO) appears on phone
+- Trigger lifelines (50/50, Google, Ask AI, Ask the Audience)
+- Walk away
+
+For Google / Ask AI lifelines, the **tab opens on the host PC**. Phone players verbally tell the host what to search. The 20-second timer applies.
+
+### Audience phones during the game
+
+- See the current question + answers (read-only)
+- See whose turn it is
+- During Ask the Audience: get a 10-second voting screen with tap-to-vote buttons
+- Eliminated players keep watching (but don't vote — eliminated = audience role)
+
+---
+
+## In-Game Host Controls
+
+The side panel shows a **Players** panel listing every player. For each non-eliminated player you'll see two buttons:
+
+### REPLACE
+Click → modal appears with a list of connected audience members. Pick one. They take over the slot, **inheriting all the original player's correct-answer tally**. The replaced player moves to audience role.
+
+Use this when:
+- A phone player loses connection (you'll see "⚠ OFFLINE" next to their name)
+- A player needs to step away mid-game
+- Anyone else: drop a player and bring in someone fresh
+
+### TAKE OVER
+Click → enter your name (defaults to "Host") → you take the slot as a **local** player at the host PC. You inherit the tally. The previous phone-player goes back to audience.
+
+Use this when there's no audience member to replace from, or you just want to take over directly.
 
 ---
 
 ## Pack Design Philosophy
 
-A **pack** is a themed set of questions spanning the full 15-tier prize ladder. Each pack is a complete gameplay experience — players don't mix themes within a single playthrough.
+Every theme pack should target **100 questions** total, spread across 5 difficulty groups:
 
-### Target pack size: **100 questions**
-
-Split across **5 difficulty groups**, each covering specific tiers:
-
-| Difficulty Group | Tiers     | Questions | Distribution (per tier) |
+| Difficulty | Tiers | Total Questions | Per-Tier |
 |---|---|---|---|
-| **Very Easy**   | 1, 2, 3       | 20 | **6 · 7 · 7** |
-| **Easy**        | 4, 5, 6       | 20 | **6 · 7 · 7** (Tier 5 is a ★ safety net) |
-| **Medium**      | 7, 8, 9, 10   | 20 | **5 · 5 · 5 · 5** (Tier 10 is a ★ safety net) |
-| **Hard**        | 11, 12, 13    | 20 | **6 · 7 · 7** |
-| **Extreme**     | 14, 15        | 20 | **10 · 10** |
+| **Very Easy** | 1, 2, 3 | 20 | 6 / 7 / 7 |
+| **Easy** | 4, 5, 6 | 20 | 6 / 7 / 7 (Tier 5 = ★ safety net) |
+| **Medium** | 7, 8, 9, 10 | 20 | 5 / 5 / 5 / 5 (Tier 10 = ★ safety net) |
+| **Hard** | 11, 12, 13 | 20 | 6 / 7 / 7 |
+| **Extreme** | 14, 15 | 20 | 10 / 10 |
 
-### Why this split?
+### Why this distribution
 
-- **20 per group** gives real variety — a player can't replay 3 times and see everything.
-- **Even within groups** prevents awkward "every replay hits the same Q14" patterns that happen when pools are tiny at the top.
-- **Top tiers get the biggest pools** (10 each at Extreme) because those are the most replay-sensitive — reaching Q15 is rare, so players want the moment to feel fresh.
-- **Medium gets 4 tiers at 5 each** — it's the long middle stretch of the game and needs steady variety without any tier pool feeling thin.
+- **20 per difficulty group** = real replay variety
+- **Even split within a group** prevents the "always Q14" syndrome at the top
+- **Top tiers get the largest pools** (10 each) because reaching them is rare — when a player hits Q15, you don't want it to feel scripted
+- **Medium gets 4 tiers × 5 each** because it's the longest gameplay stretch and needs steady pacing
 
-### Minimum enforced by the engine: **2 questions per tier**
+The engine works with any count ≥ 2 per tier. The 100/20-per-group target is the **quality bar**, not a hard requirement. Smaller packs work, they just have less replay value.
 
-Fewer than 2 and the first-played question will immediately repeat on replay. The engine won't crash below that, but the gameplay feels broken.
+### Difficulty by tier (writing guide)
 
-### Can I make smaller packs?
+Use this when writing or auditing questions. The test: **"Would an average adult immediately know this?"**
 
-Yes — the engine works with any count ≥ 2 per tier. The 100-question target is a **quality bar**, not a requirement. Your existing packs (Random Trivia, Anime, Dragon Ball, Common Sense) sit at various sizes; the 100/20-per-group target is the new standard going forward.
+#### 🟢 Very Easy (Q1–3)
+Should never make a player sweat. Wrong answers should be almost comically wrong.
+- **Tier 1 ($100)** — A child could answer this. Example: "How many days in a week?"
+- **Tier 2 ($200)** — Anyone in the topic knows it. Example: "Which planet is closest to the Sun?"
+- **Tier 3 ($300)** — One step deeper than absolute basics. Example: "Largest ocean on Earth?"
 
----
+#### 🟡 Easy (Q4–6)
+Player needs to actually think a little.
+- **Tier 4 ($500)** — Standard fan knowledge. Example: "In My Hero Academia, what's Izuku's hero name?"
+- **Tier 5 ★ ($1,000)** — Solid general knowledge. First safety net. "Who wrote Romeo and Juliet?"
+- **Tier 6 ($2,000)** — Slightly deeper recall. "Who wrote Dragon Ball?"
 
-## Balancing Difficulty — Full Per-Tier Guide
+#### 🟠 Medium (Q7–10)
+The longest stretch. Tier 10 is the second safety net.
+- **Tier 7 ($4,000)** — Engaged-fan knowledge. Someone who's read/watched the full work knows it.
+- **Tier 8 ($8,000)** — Detail-level recall. Specific names, dates, mechanics.
+- **Tier 9 ($16,000)** — Specialized knowledge. Subtle mechanic, secondary character.
+- **Tier 10 ★ ($32,000)** — Hardcore fan territory.
 
-Use this as a writing reference. Each tier has a clear difficulty expectation. When in doubt: **"Would an average adult immediately know this?"** Yes → early tier. Needs a moment → middle. Needs real knowledge → late. Needs expertise or careful thought → top.
+#### 🔴 Hard (Q11–13)
+Top half. Players will lean on lifelines here.
+- **Tier 11 ($64,000)** — Expert territory. Facts only serious fans retain.
+- **Tier 12 ($125,000)** — Deep cuts. Obscure characters, specific story events.
+- **Tier 13 ($250,000)** — Scholarly / encyclopedic. Real niche stuff.
 
-### 🟢 Very Easy (Tiers 1–3) — $100 / $200 / $300
+#### 🟣 Extreme (Q14–15)
+The endgame. Largest pools (10 each) so they feel fresh on replay.
+- **Tier 14 ($500,000)** — Very few people know this without looking it up. Production history, obscure canon details, hard puzzles.
+- **Tier 15 ($1,000,000)** — The pack-defining question. Must have a clean, unambiguous answer. Avoid contested or recent-event questions. Verify with multiple sources.
 
-The player should never sweat these. Their role is to **ease the player in**, build momentum, and warm up voice/audio cues. Wrong answers here should be almost comically wrong.
+### Rules every tier follows
 
-**Tier 1 — $100 · "a child could answer this"**
-- The most basic facts in the domain.
-- Example (general): "How many days are in a week?" → 7
-- Example (Dragon Ball): "What color is Goku's hair as a Super Saiyan?" → Yellow/Gold
-- Wrong answers: obviously nonsensical. Players should smile at the distractors.
+1. **One unambiguously correct answer.** If two could be defended, rewrite.
+2. **Plausible distractors.** Wrong answers belong to the same category as the right one. "Banana, Shakespeare, 42, Tokyo" = bad. "Picasso, Van Gogh, Da Vinci, Michelangelo" = good.
+3. **Consistent tone within a tier.** Don't mix 30-word and 5-word questions in the same difficulty.
+4. **Verify facts.** Especially Hard and Extreme. One wrong "correct" answer poisons trust in the whole pack.
 
-**Tier 2 — $200 · "everyone who knows the topic knows this"**
-- Still extremely basic, but with slightly more specificity.
-- Example (general): "Which planet is closest to the Sun?" → Mercury
-- Example (Dragon Ball): "Who is Goku's first son?" → Gohan
+### Distractor quality scales with difficulty
 
-**Tier 3 — $300 · "common knowledge for anyone paying attention"**
-- Requires one extra piece of context beyond the absolute basics.
-- Example (general): "Largest ocean on Earth?" → Pacific
-- Example (Dragon Ball): "Who trained Goku to use Kaio-ken?" → King Kai
-
-### 🟡 Easy (Tiers 4–6) — $500 / $1,000★ / $2,000
-
-Player starts needing to actually think. Tier 5 is the **first safety net** — players who clear it can't drop below $1,000.
-
-**Tier 4 — $500 · "standard fan-level knowledge"**
-- Something a casual fan of the topic remembers without effort.
-- Example (Anime): "In My Hero Academia, what is Izuku's hero name?" → Deku
-
-**Tier 5 — $1,000 ★ · "solid general knowledge (first safety net)"**
-- Should feel like a mild accomplishment to answer correctly.
-- Example (general): "Who wrote Romeo and Juliet?" → Shakespeare
-- This tier's difficulty sets the tone — if it's too easy, the $1K safety net feels meaningless. If too hard, early game feels punishing.
-
-**Tier 6 — $2,000 · "requires slightly deeper knowledge"**
-- The first tier where a less-engaged player might genuinely hesitate.
-- Example (Dragon Ball): "Who is the author/mangaka of Dragon Ball?" → Akira Toriyama
-
-### 🟠 Medium (Tiers 7–10) — $4,000 to $32,000★
-
-The **longest stretch of the game** and the biggest test of pack quality. Tier 10 is the **second safety net** — clearing it locks in $32,000.
-
-**Tier 7 — $4,000 · "engaged fan knowledge"**
-- Someone who's read / watched the full work should know this.
-- Example (general): "Who was the first US President?" → Washington (early tier classic, but could work as T7 for younger audiences)
-
-**Tier 8 — $8,000 · "detail-level recall"**
-- Names, dates, specific mechanics. Requires attention while engaging with the material.
-- Example (Dragon Ball): "What is the name of Frieza's second form attack?" or "Which transformation comes directly after Super Saiyan 2?"
-
-**Tier 9 — $16,000 · "specialized knowledge"**
-- Either a subtle mechanic, a secondary character, or a lesser-known fact that only committed fans catch.
-- Example (general): "Smallest country by area?" → Vatican City
-
-**Tier 10 — $32,000 ★ · "hardcore fan territory (second safety net)"**
-- This is the gateway to the upper half. Should feel difficult without being obscure.
-- Example (Dragon Ball): "In Dragon Ball GT, what is Baby's true form revealed in the final arc?" or "Which Spirit Bomb finally defeats Kid Buu?"
-
-### 🔴 Hard (Tiers 11–13) — $64,000 / $125,000 / $250,000
-
-The top half. Players without deep expertise will rely heavily on lifelines here. Questions should reward **mastery**.
-
-**Tier 11 — $64,000 · "expert territory"**
-- Facts that only serious fans / scholars retain.
-- Example (Dragon Ball): "What is the name of Gohan's ultimate form when unleashed by the Old Kai?" → Mystic/Ultimate Gohan
-
-**Tier 12 — $125,000 · "deep cuts"**
-- Obscure character names, specific story events, minor but canon details.
-- Example (general): "Hardest naturally occurring substance?" → Diamond (borderline T12 — real T12 might be about hardness scale specifics)
-
-**Tier 13 — $250,000 · "scholarly / encyclopedic"**
-- Real niche. Production details, obscure arc specifics, pedantic wording.
-- Example (Anime): "Who directed the 1997 TV series Revolutionary Girl Utena?" → Kunihiko Ikuhara
-
-### 🟣 Extreme (Tiers 14–15) — $500,000 / $1,000,000
-
-The endgame. **These questions should be rare enough that reaching them feels like a moment.** Give them the biggest pools (10 each) so replays keep feeling fresh.
-
-**Tier 14 — $500,000 · "very few people know this without looking it up"**
-- Production history, obscure canon details, tricky calculations, classic hard puzzles.
-- Example (general puzzle): "9 identical balls, one heavier — minimum weighings to find it?" → 2
-- Example (Anime): "Who directed Royal Space Force: The Wings of Honnêamise (1987)?" → Hiroyuki Yamaga
-
-**Tier 15 — $1,000,000 · "the question that defines the pack"**
-- The one players will remember. Should be genuinely hard, but **must have a clean, unambiguous answer**.
-- Avoid questions that could be contested (disputed dates, "best" anything, recent events that might change). Safety-check with 2+ sources.
-- Example (general puzzle): "Bat and ball cost $1.10 total. Bat costs $1 more than ball. Cost of ball?" → $0.05
-- Example (Dragon Ball canonical trivia): "What is the full name of the character who fuses with Zamasu to form Fused Zamasu?" → Goku Black
-
-### Rules that apply to every tier
-
-1. **One unambiguously correct answer.** If two options could both be defended, rewrite the question or the distractors.
-2. **Plausible wrong answers.** Throwaway distractors ruin the tension. A bad distractor set: "Banana, Shakespeare, 42, Tokyo." A good distractor set uses options that belong to the same category as the answer.
-3. **Consistent style within a tier.** Don't mix 30-word sentences with 5-word sentences in the same difficulty group.
-4. **Verify facts.** Especially Hard and Extreme. Even one wrong "correct" answer will erode trust in the whole pack.
-
-### Distractor quality matters more at higher tiers
-
-At Very Easy, silly distractors are fine (even desirable — it rewards engagement). At Extreme, distractors must be **genuinely plausible** — ideally real facts from adjacent topics. If you're asking about a character's ultimate form, the three wrong options should be real forms from the same series, not made-up ones.
+At Very Easy, silly distractors are fine. At Extreme, distractors must be **genuinely plausible**. If you're asking about a character's ultimate form, the three wrong options should be real forms from that universe, not made-up nonsense.
 
 ---
 
 ## Adding Questions
 
-All questions live in **`questions.js`**. Nothing else needs editing.
+All question data lives in **`questions.js`**. The format:
 
-### Quick example — adding one question
+```js
+{
+  q: "Question text?",
+  a: ["Option A", "Option B", "Option C", "Option D"],
+  correct: 2  // zero-indexed: 0=A, 1=B, 2=C, 3=D
+}
+```
 
-Open `questions.js`. Find the theme (e.g., `random`), find the tier (e.g., `4`), and add a new object:
+To add one question, find the right tier in the right pack and add another object to the array:
 
 ```js
 4: [
-  { q: "Who painted the Mona Lisa?", a: ["Van Gogh", "Picasso", "Leonardo da Vinci", "Michelangelo"], correct: 2 },
-  { q: "What is the capital of Japan?", a: ["Osaka", "Kyoto", "Tokyo", "Seoul"], correct: 2 },
+  { q: "Existing question?", a: [...], correct: 1 },
   // NEW:
-  { q: "In what year did the Titanic sink?", a: ["1905", "1912", "1918", "1923"], correct: 1 },
+  { q: "Your new question?", a: ["Wrong", "Right", "Wrong", "Wrong"], correct: 1 },
 ],
 ```
 
-Save. Refresh. Done.
+### Pre-commit checklist
 
-### The question object format
-
-| Field | Type | Description |
-|---|---|---|
-| `q` | string | The question. End with `?`. Aim for under ~120 chars for mobile. |
-| `a` | array of 4 strings | Options in order A, B, C, D. |
-| `correct` | integer 0–3 | **Zero-indexed.** 0=A, 1=B, 2=C, 3=D. |
-
-### Pre-commit validation checklist
-
-Before adding any question, verify:
-
-- [ ] `q` ends with a `?`
-- [ ] `a` has **exactly 4** items
-- [ ] `correct` is `0`, `1`, `2`, or `3`
-- [ ] `a[correct]` really is the right answer (most common bug)
-- [ ] Distractors are plausible and belong to the same category
-- [ ] Question fits the tier's difficulty (see the per-tier guide above)
-- [ ] **Comma after** the closing `}` if not the last item in the array
-- [ ] No curly quotes (`"` `"`) — use straight quotes (`"`)
+- `q` ends with a `?`
+- `a` has **exactly 4** items
+- `correct` is `0`, `1`, `2`, or `3`
+- `a[correct]` is genuinely the right answer (most common bug)
+- Distractors are plausible, same category as the answer
+- The question fits the tier's difficulty (see guide above)
+- **Comma after** the closing `}` if it's not the last item in the array
+- No curly quotes (`"` `"`) — only straight ones (`"`)
 
 ---
 
-## Adding a New Theme
+## Adding a New Theme Pack
 
-The theme-select menu is **data-driven** — add a pack to `QUESTION_PACKS`, and a new button appears automatically.
+The theme-select menu auto-populates from `QUESTION_PACKS`. Add a new pack and a button appears.
+
+### Full pack template
 
 ```js
 window.QUESTION_PACKS = {
   // ... existing packs ...
 
-  my_new_pack: {
-    name: "My New Pack",
+  my_pack_key: {
+    name: "Display Name",
+    description: "Short blurb shown on theme select screen.",
+    difficulty_notes: "Optional second line — e.g. skews toward modern Z and Super",
     questions: {
-      1:  [ /* ~6 Very Easy questions */ ],
-      2:  [ /* ~7 Very Easy */ ],
-      3:  [ /* ~7 Very Easy */ ],
-      4:  [ /* ~6 Easy */ ],
-      5:  [ /* ~7 Easy (safety net) */ ],
-      6:  [ /* ~7 Easy */ ],
-      7:  [ /* 5 Medium */ ],
-      8:  [ /* 5 Medium */ ],
-      9:  [ /* 5 Medium */ ],
-      10: [ /* 5 Medium (safety net) */ ],
-      11: [ /* ~6 Hard */ ],
-      12: [ /* ~7 Hard */ ],
-      13: [ /* ~7 Hard */ ],
-      14: [ /* 10 Extreme */ ],
-      15: [ /* 10 Extreme */ ],
+      // VERY EASY (Tiers 1-3, 20 questions total)
+      1:  [ /* 6 questions */ ],
+      2:  [ /* 7 questions */ ],
+      3:  [ /* 7 questions */ ],
+      // EASY (Tiers 4-6, 20 questions total — Tier 5 is safety net)
+      4:  [ /* 6 questions */ ],
+      5:  [ /* 7 questions */ ],
+      6:  [ /* 7 questions */ ],
+      // MEDIUM (Tiers 7-10, 20 questions total — Tier 10 is safety net)
+      7:  [ /* 5 questions */ ],
+      8:  [ /* 5 questions */ ],
+      9:  [ /* 5 questions */ ],
+      10: [ /* 5 questions */ ],
+      // HARD (Tiers 11-13, 20 questions total)
+      11: [ /* 6 questions */ ],
+      12: [ /* 7 questions */ ],
+      13: [ /* 7 questions */ ],
+      // EXTREME (Tiers 14-15, 20 questions total)
+      14: [ /* 10 questions */ ],
+      15: [ /* 10 questions */ ],
     }
   },
 };
 ```
 
-- **Key** (`my_new_pack`) — internal ID. Lowercase, no spaces. Used in saved games and high score entries.
-- **Name** (`"My New Pack"`) — display label. Anything goes.
-- **All 15 tiers must be populated** — empty tiers break the game when the player reaches them.
+- **Key** (`my_pack_key`) — internal ID. Lowercase, no spaces. Used in saved scores.
+- **Name** — display label. Anything.
+- **`description`** — optional. Short blurb under the name on theme select.
+- **`difficulty_notes`** — optional. Second line about scope/range.
+- **All 15 tiers must be populated.** Empty tiers crash the game when the player reaches them.
 
-Save → refresh → the new theme button appears on the theme-select screen.
+Save → reload → the new theme appears.
 
 ---
 
-## Code Walkthrough — `index.html`
+## Code Walkthrough
 
-Three main parts:
-
-1. **`<style>` block** — CSS with CSS variables for theming.
-2. **Question loader** — `<script src="questions.js"></script>`.
-3. **Main `<script>` block** — game logic.
-
-### CSS variables (top of `<style>`)
-
-```css
-:root {
-  --bg-deep: #020814;   /* Deepest background */
-  --gold:    #f4c430;   /* Primary accent */
-  --correct: #2ecc71;
-  --wrong:   #e74c3c;
-  --selected:#ff8c00;
-  --safety:  #4aa8ff;
-  /* ... */
-}
-```
-
-All colors reference these — change one to re-skin the game globally.
-
-### Script sections
+### `index.html` (main game)
 
 | Section | Purpose |
 |---|---|
-| Constants | `PRIZE_LADDER`, `SAFETY_NET_TIERS`, `TIMER_FOR_TIER`, lifeline durations |
-| Audio module | Web Audio synthesis — see [Audio System](#audio-system) |
-| State | Single `state` object. Every mutation flows through flow functions, then `render()` |
-| Persistence | Layered `window.storage` → `localStorage` → in-memory. Save, high scores, settings |
+| `<style>` | All CSS, with CSS variables for theming |
+| `<script src="...">` | Loads `questions.js`, `audio.js`, `firebase.js` |
+| Constants | `PRIZE_LADDER`, `SAFETY_NET_TIERS`, `TIMER_FOR_TIER`, `LIFELINE_*_SECONDS`, `AI_VOTER_*` |
+| State | One big `state` object. Every mutation flows through flow functions, then `render()` |
+| Persistence | Layered: `window.storage` (Claude env) → `localStorage` (any browser) → in-memory |
 | Voice | `speak()` / `stopSpeaking()`. Gated by `state.screen === 'game'` |
-| Question picking | Random from tier pool, excluding already-used |
-| Game flow | `startNewGame`, `loadQuestionForCurrentTier`, `selectAnswer`, confirmation flow, `endGame` |
-| Timer | `startTimer`, `pauseTimer`, `resumeTimer`, `adjustTimer`. Warning pulse at last 10s; buzzer at 0 |
-| Lifelines | 50/50, Google (15s pre-filled), Ask AI (25s blank). RESUME modal when done |
-| Render | Dispatches to screen renderers; modals overlay the game screen |
-| Event wiring | All elements use `data-action="..."`. `handleAction(e)` routes |
-| Cleanup | `fullCleanup()` called on Quit / Main Menu — kills timer, voice, BGM, lifeline tab |
-| Init | Checks `QUESTION_PACKS`, loads settings/save, primes voices, renders menu |
+| Question picking | Random from tier pool, excludes already-used |
+| Game flow | `startNewGame`, `loadQuestionForCurrentTier`, `selectAnswer`, `revealAndResolve`, `endGame` |
+| Timer | `startTimer`, warning pulse last 10s, distinct buzzer at 0 |
+| Lifelines | `useFiftyFifty`, `useGoogleSearch`, `useAskAI`, `useAudience`. Audience uses 10s hard timer |
+| **Broadcast + Intents** | `buildGameStateForBroadcast()`, `broadcastGameState()`, `setupIntentListener()`, `handleIntent()` — sync to/from phones |
+| Render | Dispatches to screen renderers (`renderMenu`, `renderModeSelect`, `renderRoster`, `renderGame`, `renderResult`, etc.) |
+| Modal renderers | `renderFinalConfirmModal`, `renderLifelineEndModal`, `renderContinueModal`, `renderAudienceModal`, `renderReplaceModal` |
+| Event wiring | Every interactive element has `data-action="..."` → routed in `handleAction()` |
+| Cleanup | `fullCleanup()` resets game state but **keeps the lobby room alive** for the next game |
+| Init | `setupLobbyRoom()` creates the Firebase room on app load (so QR shows from main menu) |
 
-### Key behaviors worth knowing
+### `viewer.html` (phone-side)
 
-- **Final Answer is a two-step commit** in single-player: click FINAL ANSWER → modal with YES/NO. Voice plays during the modal; clicking NO resumes the timer.
-- **Lifeline tabs don't reliably close** (browser security). After the lifeline countdown, a loud chime plays and a RESUME modal appears. The question timer stays paused until RESUME is clicked — so no time can be lost even if the tab won't close.
-- **Voice is gated** by `state.screen === 'game'`. Quitting mid-question silences everything; delayed `speak()` callbacks check the screen and drop silently.
-- **Audio requires a user gesture** (browser autoplay policy). Initialized on the first click.
+Mirrors the host's broadcast game state. Determines the user's role (active player / inactive player / audience / eliminated) and renders accordingly. Phone-side actions submit "intents" via Firebase, which the host receives, validates, and applies.
+
+### `firebase.js`
+
+Wraps Firebase Realtime Database. Exposes a clean API:
+- **Host**: `createRoom`, `setMeta`, `setGameState`, `setViewerRole`, `subscribeToViewers`, `subscribeToIntents`, `consumeIntent`, `setAudience`, `subscribeToAudienceVotes`
+- **Viewer**: `joinRoomAsViewer`, `subscribeToRoomFull`, `submitIntent`, `castAudienceVote`, `roomExists`
+- **Both**: `isConfigured`, `getStatus`, `getLastError`, `init`
+
+Falls back gracefully if not configured — game runs as before, just no QR / no live audience.
+
+### `audio.js`
+
+Web Audio synthesis. ~14 named SFX functions + ambient BGM. Edit any function to retune. See [Audio System](#audio-system) for the full sound list.
+
+### `questions.js`
+
+Pure data. Just `window.QUESTION_PACKS = {...}`.
 
 ---
 
 ## Audio System
 
-All audio is **synthesized on the fly** via Web Audio API. No external files. Edit any named function in the `audio` object.
+All synthesized via Web Audio. No external files.
 
 ### Architecture
-
 ```
 AudioContext
- └── masterGain (global volume, 0 when muted)
-      ├── individual SFX nodes (spawn/destroy per effect)
-      └── bgmGain → filter → 4 drone oscillators + LFO
+ └── masterGain (global volume; 0 when muted)
+      ├── per-SFX nodes (created and disposed per effect)
+      └── bgmGain → filter → 4 detuned oscillators + LFO shimmer
 ```
 
-### Named sound functions
+### Named SFX
 
 | Function | When | Character |
 |---|---|---|
-| `click()` | Nav button | Short square blip |
+| `click()` | Nav buttons | Short square blip |
 | `select()` | Selecting an answer | Two-tone chime |
 | `finalAnswerTension()` | Opening "Final Answer?" modal | Rising low drone |
 | `correct()` | Reveals correct | Ascending major arpeggio |
 | `wrong()` | Reveals wrong | Descending minor + buzz |
-| `tierAdvance()` | Moving to next Q | Quick rising scale |
-| `warning()` | Each of the last 10s | Heartbeat pulse |
+| `tierAdvance()` | Moving up a tier | Quick rising scale |
+| `warning()` | Each of last 10 seconds | Heartbeat pulse |
 | `timerZeroBuzzer()` | Question timer hits 0 | Harsh two-stage buzzer |
-| `timeUp()` | Reveal after timeout | Sustained sawtooth + noise |
-| `win()` | Winning $1M | Big fanfare + sustained major chord |
-| `lifelineActivate()` | Starting a lifeline | Ascending whoosh |
-| `lifelineEnd()` | Lifeline countdown done | Loud 4-note alert chime |
+| `timeUp()` | Reveal phase after timeout | Sustained sawtooth + noise |
+| `win()` | Winning $1M | Big fanfare + held chord |
+| `lifelineActivate()` | Triggering any lifeline | Ascending whoosh |
+| `lifelineEnd()` | Lifeline timer hits 0 | Loud 4-note alert |
 | `walkAway()` | Walking away | Bittersweet descending fifth |
-| `startBGM` / `stopBGM` | Game start / end | Ambient A-minor drone with LFO |
+| `voteBlip()` | Each AI vote during Ask the Audience | Soft tone |
+| `playerEliminated()` | Team mode wrong answer | Sub-bass slam |
+| `startBGM` / `stopBGM` | Game start / end | Ambient A-minor drone |
 
 ### Swapping to real audio files
 
+Replace any function with file playback:
 ```js
 correct() {
   if (!this.enabled) return;
@@ -375,167 +435,130 @@ correct() {
 }
 ```
 
-For BGM, use `<audio loop>`. You can mix synthesized and file-based sounds freely.
+For BGM use `<audio loop>`. Synthesized and file-based can mix freely.
 
 ---
 
 ## Common Modifications
 
-### Change the prize ladder
+### Change prize ladder
 ```js
-const PRIZE_LADDER = [500, 1000, 2500, ...]; // must be 15 numbers
+const PRIZE_LADDER = [500, 1000, 2500, ...]; // must stay 15 numbers
 ```
 
-### Change safety nets
+### Change safety net positions (zero-indexed)
 ```js
-const SAFETY_NET_TIERS = [2, 6, 10]; // three nets at Q3, Q7, Q11 (zero-indexed)
+const SAFETY_NET_TIERS = [4, 9];      // default: Q5, Q10
+const SAFETY_NET_TIERS = [2, 6, 10];  // alt: Q3, Q7, Q11
 ```
 
 ### Change timer durations
 ```js
 const TIMER_FOR_TIER = (tierIdx) => {
-  if (tierIdx <= 4) return 45;   // was 30
-  if (tierIdx <= 9) return 60;   // was 45
-  return 90;                      // was 60
+  if (tierIdx <= 4) return 45;   // Q1-5
+  if (tierIdx <= 9) return 60;   // Q6-10
+  return 90;                      // Q11-15
 };
 ```
 
 ### Change lifeline durations
 ```js
-const LIFELINE_GOOGLE_SECONDS = 20;
+const LIFELINE_GOOGLE_SECONDS = 30;
 const LIFELINE_AI_SECONDS = 30;
+const AUDIENCE_VOTE_SECONDS = 15; // Ask the Audience window
 ```
 
-### Remove a lifeline
-In `startNewGame`:
+### Change AI voter accuracies
 ```js
-state.lifelines = { googleSearch: true, fiftyFifty: false, askAI: true };
+const AI_VOTER_ACCURACIES = [0.75, 0.75, 0.60, 0.60, 0.60, 0.45, 0.45, 0.45, 0.30, 0.30];
+// Higher = audience more reliable. Lower = more chaotic.
 ```
 
-### Add a new lifeline ("Skip Question")
-1. Add to `state.lifelines` in `startNewGame` and `resumeSavedGame` defaults.
-2. Add the button in `renderLifelineButtons()`.
-3. Implement `useSkip()`.
-4. Add `case 'lifeline-skip':` in `handleAction`.
+### Master volume
+In `audio.js` → `setEnabled()`, change the `0.6` value (range 0–1).
 
-### Change the ChatGPT URL
+### Open Claude instead of ChatGPT for Ask AI
+In `useAskAI()`:
 ```js
-openLifelineTab(`https://claude.ai/new`, LIFELINE_AI_SECONDS, 'ai');
+openLifelineTab('https://claude.ai/new', LIFELINE_AI_SECONDS, 'ai');
 ```
-
-### Change voice characteristics
-```js
-u.rate = 0.95;   // 0.1–10
-u.pitch = 0.85;  // 0–2
-const preferred = voices.find(v => /female|samantha|karen/i.test(v.name));
-```
-
-### Adjust master volume
-In `audio.setEnabled()`, change `0.6` to your preference (0–1).
-
-### Kill BGM but keep SFX
-Remove `audio.startBGM()` calls from `startNewGame()` and `resumeSavedGame()`.
 
 ---
 
 ## Upgrade Ideas
 
 ### Easy wins
-- **Keyboard shortcuts** — `A/B/C/D` to select, `Enter` for final answer, `1/2/3` for lifelines.
-- **Pack stats display** — show "X questions available" next to each theme on select screen.
-- **Hard-reset high scores button** in Settings.
-- **Animated prize ladder** — each cleared row fills gold as you climb.
-- **Photosensitive-safe mode** — disables flashing answer reveals.
+- Keyboard shortcuts (A/B/C/D, Enter for final answer, 1/2/3/4 for lifelines)
+- Pack stats display next to each theme on select screen
+- Hard-reset high scores button in Settings
+- Animated prize ladder filling in gold as cleared
+- Photosensitive-safe mode (no flashing reveals)
 
-### Gameplay modes
-- **Daily Challenge** — same 15 Qs for everyone on a given day (seed by date). Leaderboard-friendly.
-- **Streak Mode** — infinite tiers, no prize ladder, max streak = score. Good for quick-play loops.
-- **Practice Mode** — pick any starting tier, no money, no safety nets, just study.
-- **Team Mode** — 2+ players pass questions around. Each gets 1 lifeline.
-- **Handicap Mode** — start at Q5 or Q10 with reduced max prize. Good for speed runs.
-- **Wrong-Answer Review** — after game ends, show all missed questions with the correct answer.
+### Gameplay
+- Daily challenge mode (same 15 Qs everyone seeded by date)
+- Streak mode (infinite tiers, no prize ladder)
+- Practice mode (pick starting tier, no money)
+- Wrong-answer review at end-of-game
 
-### Streaming & hosting
-- **Overlay mode** — `?overlay=1` strips menu chrome, transparent background, question + timer only. Perfect for OBS browser source.
-- **Host/viewer split** — `?role=host` vs `?role=viewer`. Host sees controls; viewer sees only the question panel.
-- **WebSocket sync** — two browser tabs share state. Real multi-device hosting (phone as controller, laptop on screen).
-- **QR-code "join the stream"** — viewers vote on answers via a mobile page; top vote shows as a stream poll.
-- **OBS browser-source tick hooks** — events fire when tiers advance so OBS can auto-switch scenes.
+### Streaming
+- Overlay mode (`?overlay=1`) — strips menu chrome for OBS browser source
+- Host/viewer URL split for multi-device hosting
+- Real Twitch chat integration for "Ask the Stream" lifeline
 
 ### Content tools
-- **Question validator** — pass over `QUESTION_PACKS` at startup: check `a.length === 4`, `correct` is 0–3, no duplicate questions within a tier, flag questions with uneven distractor lengths. Log warnings to console.
-- **Pack stats page** — breakdown per pack: questions per tier, average question length, longest/shortest, which tiers are under-provisioned.
-- **CSV/JSON import** — paste a spreadsheet into a hidden editor page (`#editor`), get back formatted pack code.
-- **Pack export** — download the current pack as a standalone `.json` for sharing.
-- **Duplicate detector** — warn if two questions across different packs are near-identical.
-
-### Polish
-- **Letter-by-letter question reveal** — each letter fades in, Regis-style dramatic pacing.
-- **Spotlight lighting on selected answer** — subtle vignette focuses attention.
-- **Particle effects on correct answer** — gold confetti burst.
-- **Haptic feedback on mobile** — short vibration on select/correct/wrong (via `navigator.vibrate`).
-- **Custom accessibility themes** — colorblind-friendly palette option.
+- Question validator (loops `QUESTION_PACKS` at load, warns about malformed entries in console)
+- Pack export/import as JSON
+- CSV→pack converter
 
 ### Bigger projects
-- **Framework rewrite (Preact)** — no build step, but enables better animations and component reuse.
-- **Backend leaderboard** — Cloudflare Workers + KV store for global high scores.
-- **Tournament bracket mode** — multiple players take turns on the same ladder; highest survivor wins.
-- **Lifeline trade system** — trade current prize tier for a refilled lifeline after answering correctly.
-- **Procedural question generation** — for math/logic packs, generate infinite variants (e.g., "What's X% of Y?" with random X and Y).
+- Backend leaderboard (Cloudflare Workers + KV)
+- Tournament bracket mode
+- Lifeline trade system (give up a tier for a refilled lifeline)
 
-### Fixes / hardening
-- **Autosave on tab close** — `window.addEventListener('beforeunload', saveCurrentGame)`.
-- **Validate `QUESTION_PACKS` at load** — loop through all packs/tiers/questions, console.warn on malformed entries.
-- **Replace native `confirm()` dialogs** — use the existing styled modal pattern for Walk Away and Quit prompts.
-- **Handle browser pop-up blocks gracefully** — instead of `alert()`, show a "copy query" button the player can click to open Google manually.
-- **Visual timer bar** — progress bar drains alongside the countdown number.
+### Hardening
+- Save game state on tab close (`beforeunload`)
+- Replace native `confirm()` with styled modals (Walk Away, Quit)
+- Visual timer bar alongside the number
+- Auto-validate `QUESTION_PACKS` on load and console-warn on errors
 
 ---
 
 ## Known Quirks
 
-1. **Pop-up blockers** — Google and Ask-AI lifelines use `window.open`. Some browsers block this. The game alerts the user; they need to allow pop-ups for the page.
-
-2. **Tab close may fail silently** — Once the lifeline tab navigates to Google or ChatGPT, `tab.close()` often fails due to cross-origin restrictions. This is why the RESUME modal + loud chime exist — so the player can't lose time even when close fails.
-
-3. **Audio needs a user gesture** — Browsers block audio until the user clicks. The game initializes audio on the first `handleAction()` call. If no sound plays on the very first interaction, click once more.
-
-4. **Voices load async** — Chrome returns an empty list from `speechSynthesis.getVoices()` on first load. Reload once; it caches after.
-
-5. **Host Mode doesn't auto-resume timer after a lifeline** — Intentional. Host has full manual control.
-
-6. **Native `confirm()` dialogs look ugly** — Walk Away and Quit use browser-native `confirm()`. See Fixes / Hardening above for the styled-modal upgrade.
+1. **Pop-up blockers** can stop Google / Ask AI lifelines from opening. Allow pop-ups for the page.
+2. **Tab close may fail silently** for Google/Ask AI — once the tab navigates cross-origin, JS can't always close it. The RESUME modal + chime exist to compensate (timer stays paused).
+3. **Audio needs a user gesture** before it can start (browser policy). The first click on the page unlocks it.
+4. **Voices load async** in some browsers. If voice host doesn't speak on first load, reload once.
+5. **Host Mode timer doesn't auto-resume** after lifelines (intentional — host has full control).
+6. **Phones must reach your URL.** `file://` URLs don't work for phones. Use a local server or hosting (see Running the Game).
 
 ---
 
 ## Troubleshooting
 
 ### "Error: questions.js not loaded"
-- Check `questions.js` is in the **same folder** as `index.html`.
-- Open DevTools (F12) → Console. Look for syntax errors — most common: missing comma after a question, or curly quotes (`"` vs `"`).
+Check `questions.js` is in the same folder as `index.html`. Open DevTools (F12) → Console for syntax errors. Most common: missing comma after a question, or curly quotes.
 
-### New theme doesn't appear on the theme select screen
-- Verify the new pack is **inside** `window.QUESTION_PACKS = { ... }`.
-- Pack key must be unique (no two packs with the same key).
-- Hard-reload: `Ctrl+Shift+R` / `Cmd+Shift+R`.
+### Theme doesn't appear on select screen
+Verify the new pack is **inside** `window.QUESTION_PACKS = { ... }`. Pack key must be unique. Hard-reload (Ctrl/Cmd+Shift+R).
 
-### Lifeline doesn't open a tab
-- Browser blocked the pop-up. Check address bar for a pop-up icon; allow pop-ups for the page.
+### QR code shows "Firebase Connection Failed"
+Press F12 → Console → look for `[firebaseSync]` messages. Common causes:
+- `databaseURL` missing or commented in `firebase.js`
+- Realtime Database not enabled (only Firestore was — they're different)
+- Database rules denying writes — set to `{ "rules": { ".read": true, ".write": true } }`
 
-### Voice doesn't play
-- Enable in **Settings** (off by default).
-- Confirm support: DevTools console → `'speechSynthesis' in window` → should be `true`.
+### Phone scans QR but says "no data"
+The QR is encoding a `file://` URL your phone can't reach. You need to serve the game over HTTP. See [Running the Game](#running-the-game).
 
-### No audio at all
-- Toggle **Sound & Music** in Settings.
-- Click somewhere in the page first — audio needs a user gesture to start.
-- Check the browser tab isn't muted (right-click tab → Unmute).
+### Phone player taps FINAL ANSWER and nothing happens
+Check the host PC's browser console for errors. The most common version of this bug was a Firebase listener attaching incorrectly — if it's recurring, paste the console output for diagnosis.
 
 ### High scores don't save
-- If running from plain `file://`, `localStorage` should still work. If it doesn't, the browser might be in Private/Incognito mode, which blocks storage.
-- Check DevTools console for warnings.
+On `file://` URLs `localStorage` works but Private/Incognito blocks it. Confirm you're not in private mode.
 
-### Game feels too easy or too hard
-- Rebalance questions across tiers — move harder ones up, easier ones down.
-- Adjust `TIMER_FOR_TIER`.
-- Review the per-tier difficulty guide above to audit your pack.
+### Audience modal stuck open
+If the 10s timer didn't reach 0, it might be the page was hidden. Refresh the page; the host's audience state should reset when you start the next question.
+
+### "Replace" / "Take Over" buttons don't show
+Only render in **team modes** (Co-op, Versus). Won't show in Single Player or Host Mode.
